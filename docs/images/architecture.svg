@@ -1,0 +1,201 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 750" width="1440" height="750" font-family="-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#343a40"/>
+    </marker>
+    <marker id="arrBlue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3b5bdb"/>
+    </marker>
+    <marker id="arrRed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#e03131"/>
+    </marker>
+    <marker id="arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2f9e44"/>
+    </marker>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="120%">
+      <feDropShadow dx="0" dy="1.5" stdDeviation="2" flood-color="#000" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <!-- background (keeps the diagram readable in dark mode viewers) -->
+  <rect width="1440" height="750" fill="#ffffff"/>
+
+  <!-- title -->
+  <text x="30" y="48" font-size="22" font-weight="700" fill="#212529">灵渠 Lingqu · 总体架构</text>
+  <text x="30" y="72" font-size="13" fill="#868e96">New API 与 9router 之间的折算金额流控 + 9router 管理层（以 1 小时为控制周期）</text>
+
+  <!-- ============ External: Client ============ -->
+  <g filter="url(#shadow)">
+    <rect x="30" y="185" width="140" height="100" rx="10" fill="#f8f9fa" stroke="#868e96" stroke-width="1.5"/>
+  </g>
+  <text x="100" y="222" font-size="15" font-weight="700" fill="#212529" text-anchor="middle">客户端</text>
+  <text x="100" y="244" font-size="11.5" fill="#495057" text-anchor="middle">Codex CLI</text>
+  <text x="100" y="260" font-size="11.5" fill="#495057" text-anchor="middle">Claude Code / 应用</text>
+
+  <!-- ============ External: New API ============ -->
+  <g filter="url(#shadow)">
+    <rect x="210" y="175" width="160" height="120" rx="10" fill="#f3f0ff" stroke="#7048e8" stroke-width="1.5"/>
+  </g>
+  <text x="290" y="208" font-size="15" font-weight="700" fill="#5f3dc4" text-anchor="middle">New API</text>
+  <text x="290" y="230" font-size="11.5" fill="#495057" text-anchor="middle">用户 · 令牌 · 计费</text>
+  <text x="290" y="248" font-size="11.5" fill="#495057" text-anchor="middle">渠道：OpenAI 类型</text>
+  <text x="290" y="264" font-size="11.5" fill="#495057" text-anchor="middle">渠道：Claude 类型</text>
+  <text x="290" y="282" font-size="10.5" fill="#868e96" text-anchor="middle">:3000 · 对外</text>
+
+  <!-- ============ Lingqu container ============ -->
+  <rect x="400" y="92" width="620" height="606" rx="14" fill="#f5f7fb" stroke="#3b5bdb" stroke-width="2"/>
+  <text x="420" y="124" font-size="19" font-weight="700" fill="#3b5bdb">灵渠 Lingqu</text>
+  <text x="1000" y="124" font-size="12" fill="#5c7cfa" text-anchor="end">代理 :8090 · 控制台 :8091</text>
+
+  <!-- data plane panel -->
+  <rect x="415" y="140" width="590" height="225" rx="10" fill="#ffffff" stroke="#c5cee0" stroke-width="1"/>
+  <text x="430" y="163" font-size="12.5" font-weight="600" fill="#495057">数据面 · 每个请求</text>
+
+  <!-- pipeline stages: x = 430 + 94*i, w=84, y 195..275 -->
+  <g font-size="13" text-anchor="middle">
+    <rect x="430" y="195" width="84" height="80" rx="8" fill="#e7edff" stroke="#3b5bdb" stroke-width="1.3"/>
+    <text x="472" y="228" font-weight="700" fill="#364fc7">① 鉴权</text>
+    <text x="472" y="249" font-size="10.5" fill="#495057">lq- 密钥</text>
+
+    <rect x="524" y="195" width="84" height="80" rx="8" fill="#e7edff" stroke="#3b5bdb" stroke-width="1.3"/>
+    <text x="566" y="228" font-weight="700" fill="#364fc7">② 识别</text>
+    <text x="566" y="249" font-size="10.5" fill="#495057">协议 · 上游池</text>
+
+    <rect x="618" y="195" width="84" height="80" rx="8" fill="#e7edff" stroke="#3b5bdb" stroke-width="1.3"/>
+    <text x="660" y="228" font-weight="700" fill="#364fc7">③ 预估</text>
+    <text x="660" y="249" font-size="10.5" fill="#495057">token→eUSD</text>
+
+    <rect x="712" y="195" width="84" height="80" rx="8" fill="#fff4e6" stroke="#e8590c" stroke-width="1.8"/>
+    <text x="754" y="222" font-weight="700" fill="#d9480f">④ 闸门</text>
+    <text x="754" y="242" font-size="10.5" fill="#495057">1h 滚动预算</text>
+    <text x="754" y="258" font-size="10.5" fill="#495057">速率 · 并发</text>
+
+    <rect x="806" y="195" width="84" height="80" rx="8" fill="#e7edff" stroke="#3b5bdb" stroke-width="1.3"/>
+    <text x="848" y="228" font-weight="700" fill="#364fc7">⑤ 代理</text>
+    <text x="848" y="249" font-size="10.5" fill="#495057">SSE 透传</text>
+
+    <rect x="900" y="195" width="84" height="80" rx="8" fill="#e7edff" stroke="#3b5bdb" stroke-width="1.3"/>
+    <text x="942" y="228" font-weight="700" fill="#364fc7">⑥ 结算</text>
+    <text x="942" y="249" font-size="10.5" fill="#495057">实际 usage</text>
+  </g>
+
+  <!-- reject branch -->
+  <rect x="700" y="310" width="108" height="40" rx="8" fill="#fff5f5" stroke="#e03131" stroke-width="1.3"/>
+  <text x="754" y="335" font-size="11.5" fill="#c92a2a" text-anchor="middle">429 / 排队 / 降级</text>
+  <line x1="754" y1="275" x2="754" y2="308" stroke="#e03131" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrRed)"/>
+
+  <!-- control plane panel -->
+  <rect x="415" y="380" width="590" height="235" rx="10" fill="#ffffff" stroke="#c5cee0" stroke-width="1"/>
+  <text x="430" y="403" font-size="12.5" font-weight="600" fill="#495057">控制面 · 后台</text>
+
+  <!-- row 1: x 430/620/810, w170, y 420..500 -->
+  <g text-anchor="middle">
+    <rect x="430" y="420" width="170" height="80" rx="8" fill="#fff4e6" stroke="#e8590c" stroke-width="1.3"/>
+    <text x="515" y="446" font-size="13" font-weight="700" fill="#d9480f">小时预算计算器</text>
+    <text x="515" y="466" font-size="10.5" fill="#495057">整点 + 事件触发重算</text>
+    <text x="515" y="482" font-size="10.5" fill="#495057">周期剩余 × 小时权重</text>
+
+    <rect x="620" y="420" width="170" height="80" rx="8" fill="#f8f9fa" stroke="#868e96" stroke-width="1.3"/>
+    <text x="705" y="446" font-size="13" font-weight="700" fill="#343a40">上游额度采集</text>
+    <text x="705" y="466" font-size="10.5" fill="#495057">响应头 used% · reset</text>
+    <text x="705" y="482" font-size="10.5" fill="#495057">折算校准</text>
+
+    <rect x="810" y="420" width="170" height="80" rx="8" fill="#f8f9fa" stroke="#868e96" stroke-width="1.3"/>
+    <text x="895" y="446" font-size="13" font-weight="700" fill="#343a40">账本 Ledger</text>
+    <text x="895" y="466" font-size="10.5" fill="#495057">请求明细 · 计数快照</text>
+    <text x="895" y="482" font-size="10.5" fill="#495057">重启回放</text>
+  </g>
+
+  <!-- row 2: y 520..600 -->
+  <g text-anchor="middle">
+    <rect x="430" y="520" width="170" height="80" rx="8" fill="#f8f9fa" stroke="#868e96" stroke-width="1.3"/>
+    <text x="515" y="546" font-size="13" font-weight="700" fill="#343a40">规则 · 价格 · 密钥</text>
+    <text x="515" y="566" font-size="10.5" fill="#495057">上游池 · 模型路由</text>
+    <text x="515" y="582" font-size="10.5" fill="#495057">shadow · 回放模拟</text>
+
+    <rect x="620" y="520" width="170" height="80" rx="8" fill="#f8f9fa" stroke="#868e96" stroke-width="1.3"/>
+    <text x="705" y="546" font-size="13" font-weight="700" fill="#343a40">控制台 · Admin API</text>
+    <text x="705" y="566" font-size="10.5" fill="#495057">水位 · 预算曲线</text>
+    <text x="705" y="582" font-size="10.5" fill="#495057">告警通知</text>
+
+    <rect x="810" y="520" width="170" height="80" rx="8" fill="#ebfbee" stroke="#2f9e44" stroke-width="1.3"/>
+    <text x="895" y="546" font-size="13" font-weight="700" fill="#2b8a3e">9router 管理器</text>
+    <text x="895" y="566" font-size="10.5" fill="#495057">健康 · 账号 · 模型同步</text>
+    <text x="895" y="582" font-size="10.5" fill="#495057">对账 · Dashboard 反代</text>
+  </g>
+
+  <!-- storage -->
+  <rect x="415" y="630" width="590" height="52" rx="10" fill="#e9ecef" stroke="#adb5bd" stroke-width="1"/>
+  <text x="710" y="661" font-size="12.5" fill="#343a40" text-anchor="middle">存储：SQLite / PostgreSQL  ·  内存滑动窗口计数器（多实例可选 Redis）</text>
+
+  <!-- ============ External: 9router ============ -->
+  <g filter="url(#shadow)">
+    <rect x="1060" y="165" width="170" height="140" rx="10" fill="#ebfbee" stroke="#2f9e44" stroke-width="1.5"/>
+  </g>
+  <text x="1145" y="198" font-size="15" font-weight="700" fill="#2b8a3e" text-anchor="middle">9router</text>
+  <text x="1145" y="220" font-size="11.5" fill="#495057" text-anchor="middle">:20128 · 仅内网</text>
+  <text x="1145" y="238" font-size="11.5" fill="#495057" text-anchor="middle">REQUIRE_API_KEY</text>
+  <text x="1145" y="256" font-size="11.5" fill="#495057" text-anchor="middle">OAuth 账号</text>
+  <text x="1145" y="274" font-size="11.5" fill="#495057" text-anchor="middle">combo · fallback</text>
+
+  <!-- ============ Upstream subscriptions ============ -->
+  <g filter="url(#shadow)">
+    <rect x="1280" y="150" width="130" height="70" rx="10" fill="#f1f3f5" stroke="#495057" stroke-width="1.5"/>
+    <rect x="1280" y="250" width="130" height="70" rx="10" fill="#fff4e6" stroke="#d9480f" stroke-width="1.5"/>
+  </g>
+  <text x="1345" y="181" font-size="15" font-weight="700" fill="#212529" text-anchor="middle">Codex</text>
+  <text x="1345" y="202" font-size="11" fill="#495057" text-anchor="middle">ChatGPT 订阅</text>
+  <text x="1345" y="281" font-size="15" font-weight="700" fill="#c2410c" text-anchor="middle">Claude</text>
+  <text x="1345" y="302" font-size="11" fill="#495057" text-anchor="middle">Claude 订阅</text>
+
+  <!-- ============ Main request flow (solid) ============ -->
+  <g stroke="#343a40" stroke-width="1.8" fill="none" marker-end="url(#arr)">
+    <line x1="170" y1="235" x2="207" y2="235"/>
+    <line x1="370" y1="235" x2="427" y2="235"/>
+    <line x1="514" y1="235" x2="522" y2="235"/>
+    <line x1="608" y1="235" x2="616" y2="235"/>
+    <line x1="702" y1="235" x2="710" y2="235"/>
+    <line x1="796" y1="235" x2="804" y2="235"/>
+    <line x1="890" y1="235" x2="898" y2="235"/>
+    <line x1="984" y1="235" x2="1057" y2="235"/>
+    <path d="M1230 215 L1277 188"/>
+    <path d="M1230 255 L1277 282"/>
+  </g>
+  <text x="1022" y="226" font-size="10.5" fill="#495057" text-anchor="middle">内网</text>
+
+  <!-- ============ Control / feedback flows (dashed) ============ -->
+  <!-- budget -> gate -->
+  <path d="M515 420 V292 H732 V278" fill="none" stroke="#e8590c" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrRed)"/>
+  <text x="522" y="345" font-size="11" fill="#d9480f">下发小时预算 H(t)</text>
+
+  <!-- quota collector -> budget calculator -->
+  <line x1="620" y1="460" x2="603" y2="460" stroke="#868e96" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr)"/>
+
+  <!-- proxy -> quota collector (response headers) -->
+  <path d="M848 275 V395 H730 V417" fill="none" stroke="#3b5bdb" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrBlue)"/>
+  <text x="856" y="300" font-size="10.5" fill="#3b5bdb">额度响应头</text>
+
+  <!-- settle -> ledger -->
+  <line x1="942" y1="275" x2="942" y2="417" stroke="#3b5bdb" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrBlue)"/>
+  <text x="948" y="340" font-size="10.5" fill="#3b5bdb">实际 eUSD</text>
+
+  <!-- ledger -> budget (used) : drawn along row1 bottom -->
+  <path d="M895 500 V510 H515 V503" fill="none" stroke="#868e96" stroke-width="1.3" stroke-dasharray="3 3" marker-end="url(#arr)"/>
+
+  <!-- 9router manager -> 9router -->
+  <path d="M980 560 H1145 V308" fill="none" stroke="#2f9e44" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrGreen)"/>
+  <text x="1153" y="450" font-size="11" fill="#2b8a3e">管理 · 同步 · 对账</text>
+
+  <!-- ============ Legend ============ -->
+  <g font-size="12" fill="#495057">
+    <line x1="30" y1="725" x2="70" y2="725" stroke="#343a40" stroke-width="1.8" marker-end="url(#arr)"/>
+    <text x="80" y="729">请求流</text>
+    <line x1="150" y1="725" x2="190" y2="725" stroke="#3b5bdb" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrBlue)"/>
+    <text x="200" y="729">用量回流</text>
+    <line x1="290" y1="725" x2="330" y2="725" stroke="#e8590c" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrRed)"/>
+    <text x="340" y="729">流控决策</text>
+    <line x1="430" y1="725" x2="470" y2="725" stroke="#2f9e44" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrGreen)"/>
+    <text x="480" y="729">管理面</text>
+    <text x="1410" y="729" text-anchor="end" fill="#adb5bd">eUSD = 按公开 API 价格折算的等价美元</text>
+  </g>
+</svg>
