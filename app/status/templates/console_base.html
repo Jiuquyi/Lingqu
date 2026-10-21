@@ -1,0 +1,3 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>灵渠 · 管理控制台</title><link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}"></head>
+<body class="bg-body-tertiary"><nav class="navbar navbar-dark bg-dark px-4"><a class="navbar-brand" href="{{ url_for('status.console') }}">灵渠 <small class="text-secondary">管理控制台</small></a>{% block logout %}{% endblock %}</nav><main class="container-fluid px-4 py-4">{% for category,message in get_flashed_messages(with_categories=true) %}<div class="alert alert-{{ category }}" role="alert">{{ message }}</div>{% endfor %}{% block content %}{% endblock %}</main></body></html>

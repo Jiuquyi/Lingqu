@@ -107,6 +107,22 @@ def register(app, cov=None):
 
     app.cli.add_command(dashboard)
 
+    router = AppGroup("router", help="Inspect and synchronize the configured 9router managers.")
+
+    @router.command("list")
+    def router_list():
+        for row in _admin(app, "GET", "/admin/routers"):
+            click.echo(f"{row['upstream']}: " + ("stale" if row["stale"] else "synced"))
+
+    @router.command("sync")
+    @click.argument("upstream")
+    def router_sync(upstream):
+        from urllib.parse import quote
+        result = _admin(app, "POST", "/admin/routers/" + quote(upstream, safe="") + "/sync")
+        click.echo(json.dumps(result, ensure_ascii=False))
+
+    app.cli.add_command(router)
+
     # ------------------------------------------------------------ pricing
 
     pricing = AppGroup("pricing", help="Show or sync the price table.")

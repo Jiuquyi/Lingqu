@@ -5,3 +5,5 @@ Flask-Migrate
 httpx
 PyYAML
 python-dotenv
+redis>=5,<7
+psycopg[binary]>=3,<4

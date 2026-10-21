@@ -1,6 +1,7 @@
 """Reverse proxy on a dashboard gate port or host (DESIGN §2.4). Plain WSGI, no Flask: nothing
 here may add a session cookie, a redirect or a buffering layer."""
 import html
+from http.cookies import SimpleCookie, CookieError
 
 import httpx
 
@@ -54,9 +55,21 @@ class DashboardGateway:
         query = environ.get("QUERY_STRING")
         url = u.base_url + path + (f"?{query}" if query else "")
         headers = []
+        local_cookies = {self.rt.app.config["SESSION_COOKIE_NAME"], "lingqu_dash_token"}
         for k, v in environ.items():
             if k.startswith("HTTP_"):
                 name = k[5:].replace("_", "-").lower()
+                if name == "cookie":
+                    cookies = SimpleCookie()
+                    try:
+                        cookies.load(v)
+                    except CookieError:
+                        continue
+                    for cookie in local_cookies:
+                        cookies.pop(cookie, None)
+                    v = "; ".join(m.OutputString() for m in cookies.values())
+                    if not v:
+                        continue
                 if name not in DROP:
                     headers.append((name, v))
         for k in ("CONTENT_TYPE", "CONTENT_LENGTH"):
@@ -70,5 +83,7 @@ class DashboardGateway:
             resp = client.send(req, stream=True)
         except httpx.HTTPError as e:
             return _page("502 Bad Gateway", "9router unreachable", f"<p>{html.escape(str(e))}</p>")
-        out = [(k, v) for k, v in resp.headers.multi_items() if k.lower() not in HOP_BY_HOP]
+        out = [(k, v) for k, v in resp.headers.multi_items()
+               if k.lower() not in HOP_BY_HOP and not
+               (k.lower() == "set-cookie" and v.split("=", 1)[0].strip() in local_cookies)]
         return f"{resp.status_code} {resp.reason_phrase}", out, stream_body(resp)

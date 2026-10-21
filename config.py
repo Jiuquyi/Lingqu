@@ -5,6 +5,10 @@ basedir = os.path.abspath(os.path.dirname(__file__))
 
 class Config:
     SECRET_KEY = os.environ.get("SECRET_KEY") or os.urandom(32).hex()
+    SESSION_COOKIE_NAME = "lingqu_console_session"
+    SESSION_COOKIE_SAMESITE = "Strict"
+    SESSION_COOKIE_SECURE = os.environ.get("LINGQU_SECURE_COOKIES", "0") == "1"
+    PERMANENT_SESSION_LIFETIME = 8 * 3600
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # 1M-context requests carry several MB of JSON; align with New API's MAX_REQUEST_BODY_MB.
     MAX_CONTENT_LENGTH = int(os.environ.get("LINGQU_MAX_BODY_MB", "128")) * 1024 * 1024

@@ -1,5 +1,6 @@
 """Status and admin endpoints on the status port (DESIGN §6, §10.2)."""
 import hmac
+import math
 import time
 
 from flask import abort, current_app, jsonify, redirect, render_template, request, url_for
@@ -23,6 +24,11 @@ def bearer():
 
 
 def require_admin():
+    from .console import console_authenticated, check_csrf
+    if not bearer() and console_authenticated():
+        if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+            check_csrf()
+        return
     token = rt().settings.admin_token
     if not token or not hmac.compare_digest(bearer(), token):
         abort(401)
@@ -147,10 +153,10 @@ def override(pool):
     if action not in ("lift", "limit", "clear"):
         return jsonify({"error": "action must be lift, limit or clear"}), 400
     value = body.get("value")
-    if action == "limit" and not (isinstance(value, (int, float)) and value > 0):
+    if action == "limit" and not (isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0):
         return jsonify({"error": "limit needs a positive value"}), 400
     until = body.get("until")
-    if action != "clear" and not (isinstance(until, (int, float)) and until > time.time()):
+    if action != "clear" and not (isinstance(until, (int, float)) and not isinstance(until, bool) and math.isfinite(until) and until > time.time()):
         return jsonify({"error": "until must be a future unix time"}), 400
     r.gate.set_override(pool, action, value, until)
     return jsonify(r.gate.pool_status(pool))
@@ -162,7 +168,8 @@ def counters_reset(pool):
     r = rt()
     if pool not in r.settings.pools:
         abort(404)
-    r.gate.counters.reset(pool)
+    with r.gate.lock:
+        r.gate.counters.reset(pool)
     r.gate.set_override(pool, "clear", None, None)
     return jsonify(r.gate.pool_status(pool))
 

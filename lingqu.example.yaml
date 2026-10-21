@@ -83,3 +83,32 @@ notify:
   webhook: ""                         # generic JSON POST; convert to Feishu etc. on the receiving side
   throttle_events: true
   auth_streak: 2                      # account_auth / router_unreachable responses in a row before an alert
+
+# M5: optional shared admission. All workers/replicas must use identical configuration,
+# a shared PostgreSQL database, and the same SECRET_KEY for console sessions.
+# redis:
+#   url: "${LINGQU_REDIS_URL}"
+#   namespace: lingqu-prod
+#   lease: 90s
+#   socket_timeout: 3s
+# storage:
+#   dsn: "${LINGQU_DATABASE_URL}"  # postgresql+psycopg://...
+# Enable inventory/health/model/combo/usage synchronization per upstream:
+# upstreams[].manager: {password: "${ROUTER_TEAM_A_PASSWORD}", refresh: 3m}
+
+# Trusted identities; request body user/metadata are never used for authorization.
+# users:
+#   - name: alice
+#     rules:
+#       - {kind: rpm, max: 30, on_exceed: reject}
+#       - {kind: concurrency, max: 2, on_exceed: hold}
+#       - {kind: hourly_cap, limit: 10, on_exceed: reject}
+#       - {kind: cycle_cap, cycle_limit: 200, cycle_period: 7d, anchor: "mon 00:00"}
+# keys:
+#   - {key: "${LQ_ALICE_CLAUDE}", pool: team-a/claude, user: alice}
+#   - {key: "${LQ_ALICE_CODEX}", pool: team-a/codex, user: alice}
+# Shared model keys (configure match.models on the referenced pools first):
+#   - {key: "${LQ_SHARED}", upstream_pools: [team-a/claude, team-a/codex],
+#      user: alice, unmatched: reject}
+# Larger pool.priority wins; equal-priority matches reject rather than depending on YAML order.
+# unmatched: fallback requires fallback_pool; unmatched: unknown explicitly opts into metering only.

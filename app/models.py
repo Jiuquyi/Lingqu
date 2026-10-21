@@ -11,6 +11,7 @@ class Ledger(db.Model):
     key_ref = db.Column(db.String(16))                             # last characters of the lq- key
     session_tag = db.Column(db.String(64), index=True)
     user_tag = db.Column(db.String(128))
+    user_ref = db.Column(db.String(128), index=True)  # trusted key binding; never request body
     protocol = db.Column(db.String(32))
     endpoint = db.Column(db.String(128))
     model_req = db.Column(db.String(128))

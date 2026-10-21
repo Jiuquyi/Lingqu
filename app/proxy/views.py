@@ -36,9 +36,18 @@ def resolve(rt, binding, model, protocol):
     if binding.pool:
         p = s.pools[binding.pool]
         return p.name, p.kind
-    for name in binding.pools:
-        if s.pools[name].matches(model):
-            return name, s.pools[name].kind
+    matches = [s.pools[n] for n in binding.pools if s.pools[n].matches(model)]
+    if matches:
+        priority = max(p.priority for p in matches)
+        winners = [p for p in matches if p.priority == priority]
+        if len(winners) != 1:
+            raise ValueError("model matches multiple equal-priority pools")
+        return winners[0].name, winners[0].kind
+    if binding.unmatched == "fallback":
+        p = s.pools[binding.fallback_pool]
+        return p.name, p.kind
+    if binding.unmatched == "reject":
+        raise ValueError("model matched no pool")
     return UNKNOWN_POOL, "claude" if protocol == proto.ANTHROPIC else "codex"
 
 
@@ -84,14 +93,17 @@ def relay(sub):
     fields = proto.read_fields(body) if request.method == "POST" else {}
     model = fields.get("model", "")
     session = request_session(fields)
-    pool, kind = resolve(rt, binding, model, protocol)
+    metered = protocol is not None and request.method == "POST"
+    try:
+        pool, kind = resolve(rt, binding, model, protocol) if metered else (binding.pool or UNKNOWN_POOL, "codex")
+    except ValueError as e:
+        return plain_error(400, protocol, f"lingqu: {e}")
     if pool == UNKNOWN_POOL and protocol:
         rt.notifier.alert("unknown_pool", model or "-", f"model {model!r} matched no pool; metered as {UNKNOWN_POOL}")
-    metered = protocol is not None and request.method == "POST"
 
     ticket = None
     if metered:
-        ticket = rt.gate.admit(pool, model, gone=client_gone_probe(request.environ), session=session)
+        ticket = rt.gate.admit(pool, model, gone=client_gone_probe(request.environ), session=session, user=binding.user)
         if ticket.rejected:
             row = base_row(rt, pool, protocol, path, fields, session, arrival, ticket)
             row.update(status=503, error_class="throttled", usage_source="none", duration_ms=0)
@@ -151,6 +163,7 @@ def base_row(rt, pool, protocol, path, fields, session, arrival, ticket):
     return {"ts": arrival, "pool": pool, "key_ref": key[-4:] if key else "", "protocol": protocol,
             "endpoint": path, "model_req": fields.get("model", ""), "stream": fields.get("stream", False),
             "session_tag": session, "user_tag": (fields.get("user") or "")[:128],
+            "user_ref": (ticket.user or None) if ticket else None,
             "cache_state": (ticket.cache or None) if ticket else None,
             "held_ms": int(ticket.held * 1000) if ticket else 0, "gate_result": ticket.result if ticket else None}
 
@@ -189,7 +202,7 @@ def metered_body(rt, resp, pool, kind, model, protocol, row, sent_at, ticket, st
                 if tracker.model and tracker.model != model:
                     price, price_ref = rt.pricing.price(tracker.model, kind)
                 counted = cost(price, tracker.usage, input_only=True)
-                counted_at = rt.gate.charge(pool, tracker.model or model, counted)
+                counted_at = rt.gate.charge(pool, model, counted, user=ticket.user)
     finally:
         resp.close()
         end = time.time()
@@ -211,7 +224,7 @@ def metered_body(rt, resp, pool, kind, model, protocol, row, sent_at, ticket, st
             total = cost(price, usage) if status < 400 or tracker.input_ready else 0.0
             accounted_at = end
             if total > counted:
-                accounted_at = rt.gate.charge(pool, tracker.model or model, total - counted)
+                accounted_at = rt.gate.charge(pool, model, total - counted, user=ticket.user)
             detail = bytes(error_text).decode("utf-8", "replace")
             error_class = proto.classify_error(status, detail)
             if error_class is None and tracker.error:

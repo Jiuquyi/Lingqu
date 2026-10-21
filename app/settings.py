@@ -76,6 +76,7 @@ class Pool:
     match: list = field(default_factory=list)
     rules: list = field(default_factory=list)
     connections: list = field(default_factory=list)
+    priority: int = 0
 
     def matches(self, model):
         return any(fnmatch.fnmatchcase(model or "", p) for p in self.match)
@@ -98,6 +99,7 @@ class Upstream:
     api_key: str
     dashboard: Dashboard | None = None
     quota: dict = field(default_factory=dict)
+    manager: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -106,6 +108,9 @@ class KeyBinding:
     upstream: str
     pool: str | None = None
     pools: list = field(default_factory=list)
+    user: str = ""
+    unmatched: str = "reject"
+    fallback_pool: str | None = None
 
 
 @dataclass
@@ -132,6 +137,11 @@ class Settings:
     auth_streak: int = 2        # account_auth / router_unreachable responses in a row before an alert
     path: str = ""
     weight_profiles: dict = field(default_factory=dict)
+    redis: dict = field(default_factory=dict)
+    users: dict = field(default_factory=dict)
+
+    def pool_config(self, name):
+        return self.users.get(name[6:]) if name.startswith("@user/") else self.pools.get(name)
 
     def dashboard_ports(self):
         return sorted({u.dashboard.port for u in self.upstreams.values() if u.dashboard and u.dashboard.port})
@@ -180,7 +190,14 @@ class _Loader:
 
 
 def load(path=None, text=None):
-    """(Settings, errors, warnings) from a file or a YAML string."""
+    """(Settings, errors, warnings), including malformed nested YAML types."""
+    try:
+        return _load(path, text)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return Settings(path=path or ""), ["config: invalid value or nested structure; check field types"], []
+
+
+def _load(path=None, text=None):
     ld = _Loader()
     s = Settings(path=path or "")
     try:
@@ -193,6 +210,10 @@ def load(path=None, text=None):
     if not isinstance(raw, dict):
         return s, ["config: top level must be a mapping"], []
     raw = ld.env(raw)
+    for section in ("server", "storage", "pricing", "defaults", "notify"):
+        if raw.get(section) is not None and not isinstance(raw[section], dict):
+            ld.errors.append(f"{section}: must be a mapping")
+            raw[section] = {}
     _server(ld, s, raw.get("server") or {})
     s.dsn = ((raw.get("storage") or {}).get("dsn") or "").strip()
     _pricing(ld, s, raw.get("pricing") or {})
@@ -202,7 +223,9 @@ def load(path=None, text=None):
     _upstreams(ld, s, raw.get("upstreams") or [])
     _weights(ld, s, raw.get("weight_profiles") or {})
     _pools(ld, s, raw.get("pools") or [])
+    _users(ld, s, raw.get("users") or [])
     _keys(ld, s, raw.get("keys") or [])
+    _redis(ld, s, raw.get("redis") or {})
     notify = raw.get("notify") or {}
     s.webhook = (notify.get("webhook") or "").strip()
     s.notify_throttle = bool(notify.get("throttle_events", True))
@@ -215,6 +238,9 @@ def load(path=None, text=None):
 
 def _server(ld, s, raw):
     s.admin_token = raw.get("admin_token") or ""
+    if not isinstance(s.admin_token, str):
+        ld.errors.append("server.admin_token: must be a string")
+        s.admin_token = ""
     s.fail_mode = raw.get("fail_mode", "open")
     if s.fail_mode not in ("open", "closed"):
         ld.errors.append(f"server.fail_mode: {s.fail_mode!r} is not open or closed")
@@ -304,17 +330,20 @@ def _upstreams(ld, s, raw):
         ld.errors.append("upstreams: must be a list")
         return
     for i, u in enumerate(raw):
-        name = (u or {}).get("name")
-        if not name:
-            ld.errors.append(f"upstreams[{i}]: name is required")
+        if not isinstance(u, dict):
+            ld.errors.append(f"upstreams[{i}]: must be a mapping")
+            continue
+        name = u.get("name")
+        if not isinstance(name, str) or not 1 <= len(name) <= 128:
+            ld.errors.append(f"upstreams[{i}]: name must contain 1-128 characters")
             continue
         if name in s.upstreams:
             ld.errors.append(f"upstreams: duplicate name {name}")
             continue
         if not u.get("base_url"):
             ld.errors.append(f"upstream {name}: base_url is required")
-        if not u.get("api_key"):
-            ld.errors.append(f"upstream {name}: api_key is empty")
+        if not isinstance(u.get("api_key"), str) or not u.get("api_key"):
+            ld.errors.append(f"upstream {name}: api_key must be a non-empty string")
         dash = None
         if u.get("dashboard"):
             d = u["dashboard"]
@@ -347,13 +376,25 @@ def _upstreams(ld, s, raw):
                 ld.errors.append(f"upstream {name}: quota needs 0 < refresh <= stale_after")
             if not isinstance(quota.get("password"), str) or not quota.get("password"):
                 ld.errors.append(f"upstream {name}: quota.password is required")
+        manager = u.get("manager") or {}
+        if not isinstance(manager, dict):
+            ld.errors.append(f"upstream {name}: manager must be a mapping")
+            manager = {}
+        if manager:
+            manager = dict(manager)
+            manager["refresh"] = ld.duration(f"upstream {name}: manager.refresh", manager.get("refresh"), 180)
+            if not isinstance(manager.get("password"), str) or not manager.get("password"):
+                ld.errors.append(f"upstream {name}: manager.password is required")
         s.upstreams[name] = Upstream(name=name, base_url=(u.get("base_url") or "").rstrip("/"),
-                                     api_key=u.get("api_key") or "", dashboard=dash, quota=quota)
+                                     api_key=u.get("api_key") or "", dashboard=dash, quota=quota, manager=manager)
 
 
 def _rule(ld, pool, i, raw):
     where = f"pool {pool}: rules[{i}]"
-    kind = (raw or {}).get("kind")
+    if not isinstance(raw, dict):
+        ld.errors.append(f"{where}: rule must be a mapping")
+        return None
+    kind = raw.get("kind")
     if kind not in RULE_KINDS:
         ld.errors.append(f"{where}: unknown kind {kind!r}")
         return None
@@ -373,6 +414,8 @@ def _rule(ld, pool, i, raw):
     if not isinstance(scope, dict) or ("model" in scope and not isinstance(scope["model"], str)):
         ld.errors.append(f"{where}: scope must be a mapping with a model pattern")
         scope = {}
+    if "model" in scope and not scope["model"]:
+        ld.errors.append(f"{where}: scope.model must be a non-empty pattern")
     if set(scope) - {"model"}:
         ld.errors.append(f"{where}: only a model scope is supported")
     aware = raw.get("session_aware", False)
@@ -427,6 +470,8 @@ def _rule(ld, pool, i, raw):
                     ld.errors.append(f"{where}: short_limit must be positive")
     else:
         r.max = int(ld.number(f"{where}: max", raw.get("max"), 0) or 0)
+        if isinstance(raw.get("max"), (int, float)) and (isinstance(raw["max"], bool) or raw["max"] != r.max):
+            ld.errors.append(f"{where}: max must be an integer")
         if not raw.get("max"):
             ld.errors.append(f"{where}: {kind} needs a max")
     return r
@@ -437,8 +482,11 @@ def _pools(ld, s, raw):
         ld.errors.append("pools: must be a list")
         return
     for i, p in enumerate(raw):
-        name = (p or {}).get("name")
-        if not name:
+        if not isinstance(p, dict):
+            ld.errors.append(f"pools[{i}]: must be a mapping")
+            continue
+        name = p.get("name")
+        if not isinstance(name, str) or not 1 <= len(name) <= 128 or name.startswith("@user/"):
             ld.errors.append(f"pools[{i}]: name is required")
             continue
         if name in s.pools:
@@ -468,12 +516,24 @@ def _pools(ld, s, raw):
         if not isinstance(connections, list) or any(not isinstance(c, str) or not c for c in connections):
             ld.errors.append(f"pool {name}: connections must be a list of connection IDs")
             connections = []
-        match = (p.get("match") or {}).get("models") or []
-        keys = [k for k in (p.get("keys") or [])]
-        if any(not k for k in keys):
-            ld.errors.append(f"pool {name}: a key is empty")
+        match_raw = p.get("match") or {}
+        match = match_raw.get("models", []) if isinstance(match_raw, dict) else None
+        if not isinstance(match, list) or any(not isinstance(m, str) or not m for m in match):
+            ld.errors.append(f"pool {name}: match.models must be a list of non-empty patterns")
+            match = []
+        priority = p.get("priority", 0)
+        if isinstance(priority, bool) or not isinstance(priority, int):
+            ld.errors.append(f"pool {name}: priority must be an integer")
+            priority = 0
+        keys = p.get("keys") or []
+        if not isinstance(keys, list) or any(not isinstance(k, str) or not k for k in keys):
+            ld.errors.append(f"pool {name}: keys must be a list of non-empty strings")
+            keys = []
+        rule_ids = [(r.kind, r.scope_key, r.shadow) for r in rules]
+        if len(rule_ids) != len(set(rule_ids)):
+            ld.errors.append(f"pool {name}: duplicate rule kind, model scope and mode")
         s.pools[name] = Pool(name=name, kind=kind, upstream=p.get("upstream"),
-                             keys=[k for k in keys if k], match=list(match), rules=rules, connections=connections)
+                             keys=[k for k in keys if k], match=list(match), rules=rules, connections=connections, priority=priority)
         for k in keys:
             if not k:
                 continue
@@ -484,14 +544,36 @@ def _pools(ld, s, raw):
 
 
 def _keys(ld, s, raw):
+    if not isinstance(raw, list):
+        ld.errors.append("keys: must be a list")
+        return
     for i, k in enumerate(raw):
-        key, pools = (k or {}).get("key"), (k or {}).get("upstream_pools") or []
-        if not key:
-            ld.errors.append(f"keys[{i}]: key is empty")
+        if not isinstance(k, dict):
+            ld.errors.append(f"keys[{i}]: must be a mapping")
+            continue
+        key, pools = k.get("key"), k.get("upstream_pools") or []
+        if not isinstance(key, str) or not key:
+            ld.errors.append(f"keys[{i}]: key must be a non-empty string")
             continue
         if key in s.keys:
             ld.errors.append(f"keys[{i}]: the key is already bound")
             continue
+        user = k.get("user", "")
+        if user and user not in s.users:
+            ld.errors.append(f"keys[{i}]: unknown user {user!r}")
+        if k.get("pool"):
+            if k["pool"] not in s.pools:
+                ld.errors.append(f"keys[{i}]: unknown pool")
+            elif pools:
+                ld.errors.append(f"keys[{i}]: choose pool or upstream_pools")
+            else:
+                s.keys[key] = KeyBinding(upstream=s.pools[k["pool"]].upstream, pool=k["pool"], user=user)
+            continue
+        if not isinstance(pools, list) or any(not isinstance(p, str) for p in pools):
+            ld.errors.append(f"keys[{i}]: upstream_pools must be a list of pool names")
+            continue
+        if len(pools) != len(set(pools)):
+            ld.errors.append(f"keys[{i}]: upstream_pools contains duplicate pools")
         missing = [p for p in pools if p not in s.pools]
         if not pools or missing:
             ld.errors.append(f"keys[{i}]: upstream_pools must name defined pools (missing: {', '.join(missing) or '-'})")
@@ -503,7 +585,18 @@ def _keys(ld, s, raw):
         for p in pools:
             if not s.pools[p].match:
                 ld.errors.append(f"keys[{i}]: pool {p} has no match.models, so no model can reach it")
-        s.keys[key] = KeyBinding(upstream=ups.pop(), pools=list(pools))
+        unmatched = k.get("unmatched", "reject")
+        fallback = k.get("fallback_pool")
+        if unmatched not in ("reject", "unknown", "fallback"):
+            ld.errors.append(f"keys[{i}]: unmatched must be reject, unknown or fallback")
+        if unmatched == "fallback" and fallback not in pools:
+            ld.errors.append(f"keys[{i}]: fallback_pool must belong to upstream_pools")
+        for a in pools:
+            for b in pools:
+                if a < b and s.pools[a].priority == s.pools[b].priority and set(s.pools[a].match) & set(s.pools[b].match):
+                    ld.errors.append(f"keys[{i}]: duplicate model pattern in equal-priority pools {a}, {b}")
+        s.keys[key] = KeyBinding(upstream=ups.pop(), pools=list(pools), user=user,
+                               unmatched=unmatched, fallback_pool=fallback)
 
 
 def valid_anchor(value):
@@ -569,5 +662,50 @@ def _cross_checks(ld, s):
                 ld.errors.append(f"upstream {u.name}: dashboard host {d.host} is already used by {seen_host[key]}")
             seen_host[key] = u.name
     for p in s.pools.values():
-        if not p.keys and not any(p.name in b.pools for b in s.keys.values()):
+        if not p.keys and not any(p.name == b.pool or p.name in b.pools for b in s.keys.values()):
             ld.warnings.append(f"pool {p.name}: no key reaches it")
+
+
+def _users(ld, s, raw):
+    if not isinstance(raw, list):
+        ld.errors.append("users: must be a list")
+        return
+    for i, u in enumerate(raw):
+        if not isinstance(u, dict) or not isinstance(u.get("name"), str) or not 1 <= len(u.get("name", "")) <= 122:
+            ld.errors.append(f"users[{i}]: name must contain 1-122 characters")
+            continue
+        name = u["name"]
+        if name in s.users:
+            ld.errors.append(f"users: duplicate name {name}")
+        rules = [r for r in (_rule(ld, f"user {name}", j, r) for j, r in enumerate(u.get("rules") or [])) if r]
+        if any(r.kind == "hourly_budget" for r in rules):
+            ld.errors.append(f"user {name}: hourly_budget requires a subscription pool; use hourly_cap or cycle_cap")
+        caps = [r for r in rules if r.kind == "hourly_cap" and not r.shadow]
+        if len({r.release for r in caps}) > 1 or len({r.session_aware for r in caps}) > 1:
+            ld.errors.append(f"user {name}: enforcing caps must share release and session_aware")
+        scopes = [(r.kind, r.scope_key, r.shadow) for r in rules]
+        if len(scopes) != len(set(scopes)):
+            ld.errors.append(f"user {name}: duplicate rule scope")
+        if any(r.kind == "cycle_cap" and r.anchor == "upstream_reset" for r in rules):
+            ld.errors.append(f"user {name}: cycle_cap needs an explicit calendar or unix anchor")
+        s.users[name] = Pool(name="@user/" + name, kind="user", upstream="", rules=rules)
+
+
+def _redis(ld, s, raw):
+    if not isinstance(raw, dict):
+        ld.errors.append("redis: must be a mapping")
+        return
+    if not raw:
+        return
+    from urllib.parse import urlsplit
+    url = raw.get("url", "")
+    if not isinstance(url, str) or urlsplit(url).scheme not in ("redis", "rediss", "unix"):
+        ld.errors.append("redis.url: expected redis://, rediss:// or unix:// URL")
+    namespace = raw.get("namespace", "lingqu")
+    if not isinstance(namespace, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", namespace):
+        ld.errors.append("redis.namespace: use 1-64 letters, digits, underscores or hyphens")
+    s.redis = {"url": url, "namespace": namespace,
+               "lease": ld.duration("redis.lease", raw.get("lease"), 90),
+               "socket_timeout": ld.duration("redis.socket_timeout", raw.get("socket_timeout"), 3)}
+    if s.redis["lease"] < 30:
+        ld.errors.append("redis.lease: must be at least 30s (active streams renew every 10s)")

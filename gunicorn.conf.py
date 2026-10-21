@@ -1,10 +1,10 @@
-"""gunicorn settings (DESIGN §11.2): exactly one worker, because the windows, departure times
-and hold queues live in that process's memory. Ports come from lingqu.yaml."""
+"""gunicorn settings (DESIGN §11.2): one worker by default. Extra workers require Redis
+to coordinate windows, departure times and hold queues. Ports come from lingqu.yaml."""
 import os
 import signal
 
 worker_class = "gthread"
-workers = 1
+workers = int(os.environ.get("LINGQU_WORKERS", "1"))
 threads = int(os.environ.get("LINGQU_THREADS", "64"))
 graceful_timeout = 600
 timeout = 0  # gthread heartbeats from its main loop; long streams must not trip it
@@ -19,6 +19,8 @@ def _binds():
     s, errors, _ = settings_mod.load(path)
     if errors:
         raise SystemExit("lingqu: invalid config %s:\n  " % path + "\n  ".join(errors))
+    if workers > 1 and not s.redis:
+        raise SystemExit("LINGQU_WORKERS > 1 requires redis configuration")
     host = os.environ.get("LINGQU_BIND_HOST", "0.0.0.0")
     return [f"{host}:{p}" for p in [s.proxy_port, s.status_port] + s.dashboard_ports()]
 
