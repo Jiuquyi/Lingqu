@@ -33,6 +33,11 @@ class Notifier:
         self.wake.set()
         return True
 
+    def forget(self, kind, subject):
+        """Let the next alert of this kind and subject through at once."""
+        with self.lock:
+            self.last.pop((kind, subject), None)
+
     def run_once(self):
         self.wake.wait(5)
         self.wake.clear()

@@ -196,6 +196,104 @@ class ProxyTestCase(unittest.TestCase):
         restore_counters(self.app, self.rt.gate)
         self.assertAlmostEqual(self.rt.gate.counters.spent("a/claude", "*", time.time()), spent, places=6)
 
+    # ------------------------------------------------------------ M3: sessions, error classes, alerts
+
+    def session_body(self, session):
+        return {"model": "claude-opus-5-5", "stream": True,
+                "metadata": {"user_id": f"user_x_account_y_session_{session}"}}
+
+    def test_cache_state_follows_the_session(self):
+        self.post("/v1/messages", self.session_body("aaaa1111-0001")).get_data()
+        self.post("/v1/messages", self.session_body("aaaa1111-0001")).get_data()
+        self.post("/v1/messages", {"model": "claude-opus-5-5", "stream": True}).get_data()
+        rows = self.rows()
+        self.assertEqual([r.cache_state for r in rows], ["cold", "warm", "none"])
+        self.assertEqual(rows[0].session_tag, "aaaa1111-0001")
+
+    def test_codex_session_from_prompt_cache_key(self):
+        self.router.reply = lambda *a: (200, JSON, [b'{"model":"gpt-6.1-sol","usage":{"input_tokens":10,"output_tokens":2}}'], 0)
+        self.post("/v1/responses", {"model": "gpt-6.1-sol", "prompt_cache_key": "conv-1"}, key="lq-a-codex")
+        self.assertEqual(self.rows()[0].session_tag, "conv-1")
+
+    def test_sessions_restored_from_ledger(self):
+        self.post("/v1/messages", self.session_body("bbbb2222-0001")).get_data()
+        self.rows()
+        self.rt.gate.sessions.last.clear()
+        from app.ledger import restore_counters
+        restore_counters(self.app, self.rt.gate)
+        self.assertLess(self.rt.gate.sessions.since("a/claude", "bbbb2222-0001", time.time()), 60)
+
+    def test_error_inside_a_200_stream_is_classified(self):
+        chunks = anthropic_stream()[:1] + sse_chunks(
+            ("error", {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}))
+        self.router.reply = lambda *a: (200, SSE, chunks, 0)
+        r = self.post("/v1/messages", {"model": "claude-opus-5-5", "stream": True})
+        self.assertEqual(r.status_code, 200)
+        r.get_data()
+        row = self.rows()[0]
+        self.assertEqual((row.status, row.error_class), (200, "upstream_overloaded"))
+        self.assertGreater(row.eusd, 0)                    # the input side was counted at message_start
+
+    def test_account_auth_streak_alerts_and_recovers(self):
+        body = b'{"type":"error","error":{"type":"authentication_error","message":"OAuth access token has been revoked"}}'
+        self.router.reply = lambda *a: (401, JSON, [body], 0)
+        send = lambda: self.post("/v1/messages", {"model": "claude-opus-5-5"}).get_data()
+        send()
+        kinds = lambda: [a["kind"] for a in self.rt.notifier.queue]
+        self.assertNotIn("account_auth", kinds())             # one failure is not yet a streak
+        self.router.reply = lambda *a: (400, JSON, [b'{"error":"bad request"}'], 0)
+        send()                                                 # a client error neither breaks nor extends it
+        self.router.reply = lambda *a: (401, JSON, [body], 0)
+        send()
+        self.assertIn("account_auth", kinds())
+        e = self.rt.last_errors["a/claude"]
+        self.assertEqual((e["class"], e["streak"], e["alerted"]), ("account_auth", 2, True))
+        send()
+        self.assertEqual(kinds().count("account_auth"), 1)     # once per streak
+        self.router.reply = lambda *a: (200, SSE, anthropic_stream(), 0)
+        self.post("/v1/messages", {"model": "claude-opus-5-5", "stream": True}).get_data()
+        self.assertIn("account_auth_recovered", kinds())
+        self.assertEqual(self.rt.last_errors["a/claude"]["streak"], 0)
+        self.rt.ledger.flush()
+        from app.models import GateEvent
+        self.assertEqual([e.event for e in GateEvent.query.order_by(GateEvent.id)],
+                         ["account_auth", "account_auth_recovered"])
+        self.router.reply = lambda *a: (401, JSON, [body], 0)  # a new streak alerts again at once
+        send()
+        send()
+        self.assertEqual(kinds().count("account_auth"), 2)
+
+    def test_router_unreachable(self):
+        self.router.close()
+        up = self.rt.settings.upstreams["r1"]
+        import socket
+        with socket.socket() as sk:                         # a port nobody listens on
+            sk.bind(("127.0.0.1", 0))
+            port = sk.getsockname()[1]
+        up.base_url = f"http://127.0.0.1:{port}"
+        for _ in range(2):
+            r = self.post("/v1/messages", {"model": "claude-opus-5-5"})
+            self.assertEqual(r.status_code, 502)
+        self.assertEqual(self.rows()[0].error_class, "router_unreachable")
+        self.assertIn("router_unreachable", [a["kind"] for a in self.rt.notifier.queue])
+        self.router = FakeRouter()                          # for tearDown
+
+    def test_status_and_stats_m3_fields(self):
+        self.post("/v1/messages", self.session_body("cccc3333-0001")).get_data()
+        self.rows()
+        st = self.proxy.get("/status", environ_overrides={"SERVER_PORT": "8091"}).get_json()
+        pool = [p for p in st["pools"] if p["name"] == "a/claude"][0]
+        self.assertEqual(pool["sessions"], {"aware": False, "warm": 1})
+        self.assertEqual(pool["concurrency"]["peak_1h"], 1)
+        self.assertEqual(pool["held_cold"], 0)
+        stats = self.proxy.get("/stats?period=24h", environ_overrides={"SERVER_PORT": "8091"}).get_json()
+        a = stats["pools"]["a/claude"]
+        self.assertEqual((a["cold"]["count"], a["cold"]["eusd_share"]), (1, 1.0))
+        self.assertEqual((a["concurrency_peak"], a["shadow_would_hold"]), (1, 0))
+        page = self.proxy.get("/", environ_overrides={"SERVER_PORT": "8091"})
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("1 小时最多 1", page.get_data(as_text=True))
+
 
 class DashboardGateTestCase(unittest.TestCase):
     def setUp(self):

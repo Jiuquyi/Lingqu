@@ -1,5 +1,5 @@
 """Anthropic /v1/messages: message_start carries the input side, message_delta the running output."""
-from .base import Tracker, num
+from .base import Tracker, error_of, num
 
 
 def read_usage(u, usage):
@@ -34,6 +34,8 @@ class AnthropicTracker(Tracker):
             read_usage({k: v for k, v in u.items() if v is not None and (v or k == "output_tokens")}, self.usage)
         elif kind == "message_stop":
             self.complete = True
+        elif kind == "error":
+            self.error = error_of(obj) or ("error", "")
 
     def _final(self, obj):
         self.model = obj.get("model") or self.model

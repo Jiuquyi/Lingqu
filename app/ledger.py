@@ -91,7 +91,9 @@ def save_counters(app, counters, clock=time.time):
 
 def restore_counters(app, gate, clock=time.time):
     """Rebuild the windows: last counter snapshot, then ledger rows after it (DESIGN §9).
-    Rows are charged at the time they were counted, by the scopes of the current settings."""
+    Rows are charged at the time they were counted, by the scopes of the current settings.
+    Also tells the gate when each session last went upstream, so a session that was warm before
+    the restart is not taken for a cold one."""
     now = clock()
     since = now - 3600
     restored = 0
@@ -104,7 +106,13 @@ def restore_counters(app, gate, clock=time.time):
                     gate.counters.add(s.pool, [s.scope_key], int(minute) * 60, amount, now)
             since = saved_at
         # A request is charged twice: its input when counted (message_start), the rest at its end.
-        for r in Ledger.query.filter(Ledger.ts >= since - 3600).all():
+        # since - 3600 is at least an hour back: far enough for every cache that can still be warm.
+        rows = Ledger.query.filter(Ledger.ts >= since - 3600).all()
+        with gate.lock:
+            for r in rows:
+                if r.session_tag and r.gate_result != "rejected":
+                    gate.sessions.started(r.pool, r.session_tag, r.ts + (r.held_ms or 0) / 1000)
+        for r in rows:
             model = r.model_actual or r.model_req
             first = r.eusd_input or 0
             start = r.counted_at or r.ts

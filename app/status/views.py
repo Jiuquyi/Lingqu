@@ -30,7 +30,9 @@ def require_admin():
 
 PERIODS = [("today", "今天"), ("24h", "24 小时"), ("7d", "7 天"), ("30d", "30 天")]
 EVENT_NAMES = {"throttle_start": "开始排队", "throttle_end": "解除", "step_change": "换档", "rejected": "拒绝（503）",
-               "override": "管理员覆盖", "gate_error": "闸门错误"}
+               "override": "管理员覆盖", "gate_error": "闸门错误",
+               "account_auth": "账户授权失效", "account_auth_recovered": "账户授权恢复",
+               "router_unreachable": "连不上 9router", "router_unreachable_recovered": "9router 恢复"}
 
 @status.app_template_filter("clock")
 def _clock(t):

@@ -33,6 +33,7 @@ class Ledger(db.Model):
     ttfb_ms = db.Column(db.Integer)
     duration_ms = db.Column(db.Integer)
     gate_result = db.Column(db.String(32))
+    cache_state = db.Column(db.String(8))                          # warm | cold | none, from the session's last start
 
 
 class GateEvent(db.Model):

@@ -71,3 +71,27 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings_mod.parse_duration(15), 15)
         with self.assertRaises(ValueError):
             settings_mod.parse_duration("soon")
+
+    def test_session_aware(self):
+        s, errors, _ = settings_mod.load(text=BASE.replace("release: fifo }", "release: fifo, session_aware: true }"))
+        self.assertEqual(errors, [])
+        self.assertTrue(s.pools["a/claude"].rules[0].session_aware)
+        self.assertEqual((s.cache_ttl, s.hold_cap_cold), (300, 300))
+        _, errors, _ = settings_mod.load(text=BASE.replace("release: fifo }", "release: phase, session_aware: true }"))
+        self.assertTrue(any("session_aware applies only" in e for e in errors))
+        _, errors, _ = settings_mod.load(text=BASE.replace(
+            "rules: [{ kind: hourly_cap, limit: 20, on_exceed: hold, release: fifo }]",
+            "rules: [{ kind: hourly_cap, limit: 20, session_aware: true }, "
+            "{ kind: hourly_cap, limit: 5, scope: { model: 'claude-opus-*' } }]"))
+        self.assertTrue(any("all of its enforcing hourly_cap" in e for e in errors))
+        _, errors, _ = settings_mod.load(text=BASE.replace("hold_cap_cached: 120s }", "hold_cap_cached: 120s, cache_ttl: 10s }"))
+        self.assertTrue(any("cache_ttl" in e for e in errors))
+        _, errors, warnings = settings_mod.load(text=BASE.replace("hold_cap_cached: 120s }",
+                                                                  "hold_cap_cached: 120s, hold_cap_cold: 60s }"))
+        self.assertEqual(errors, [])
+        self.assertTrue(any("hold_cap_cold is shorter" in w for w in warnings))
+
+    def test_auth_streak(self):
+        self.assertEqual(load().auth_streak, 2)
+        s, errors, _ = settings_mod.load(text=BASE + "notify: { auth_streak: 3 }\n")
+        self.assertEqual((errors, s.auth_streak), ([], 3))

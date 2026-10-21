@@ -174,8 +174,8 @@ def register(app, cov=None):
     @app.cli.command()
     @click.option("--source", type=click.Choice(["ledger", "newapi", "jsonl"]), default="ledger")
     @click.option("--pool", required=True, help="Pool to replay (its kind and prices are used).")
-    @click.option("--from", "start", required=True, help="YYYY-MM-DD")
-    @click.option("--to", "end", required=True, help="YYYY-MM-DD (exclusive)")
+    @click.option("--from", "start", default=None, help="YYYY-MM-DD (required unless --source jsonl)")
+    @click.option("--to", "end", default=None, help="YYYY-MM-DD, exclusive (required unless --source jsonl)")
     @click.option("--policy", "policy_path", default=None, help="YAML file with one policy or a policies list.")
     @click.option("--compare", type=click.Choice(["current", "none"]), default="current",
                   help="Also run the pool's configured rule (current) or nothing extra.")
@@ -189,19 +189,21 @@ def register(app, cov=None):
         s = rt.settings
         if pool not in s.pools:
             raise click.ClickException(f"unknown pool {pool}")
+        if source != "jsonl" and not (start and end):
+            raise click.ClickException("--from and --to are required with --source ledger or newapi")
         p = s.pools[pool]
         rt.pricing.load_snapshot()
 
         def price_of(model):
             return rt.pricing.price(model, p.kind)[0]
 
-        t0, t1 = rp.parse_day(start), rp.parse_day(end)
+        t0, t1 = (rp.parse_day(start) if start else 0), (rp.parse_day(end) if end else float("inf"))
         if source == "ledger":
             reqs = rp.from_ledger(pool, t0, t1, price_of)
         elif source == "jsonl":
             if not jsonl_path:
                 raise click.ClickException("--jsonl is required with --source jsonl")
-            reqs = rp.from_jsonl(jsonl_path, price_of)
+            reqs = [r for r in rp.from_jsonl(jsonl_path, price_of) if t0 <= r.t < t1]
         else:
             na = s.pricing.get("newapi") or {}
             token = os.environ.get("NEWAPI_ACCESS_TOKEN") or na.get("token")
@@ -221,10 +223,12 @@ def register(app, cov=None):
         if policy_path:
             policies += rp.load_policies(policy_path, default_limit)
         sessions = len({r.session for r in reqs})
-        click.echo(f"{pool} {start}..{end}: {len(reqs)} requests, {sessions} sessions, "
+        click.echo(f"{pool} {start or '-'}..{end or '-'}: {len(reqs)} requests, {sessions} sessions, "
                    f"${sum(r.cost for r in reqs):.2f}")
         if not reqs:
             return
+        # Does "nothing from this session for cache_ttl" really mean a cache rebuild on this pool?
+        rp.classify_table(rp.classify_check(reqs, s.cache_ttl), click.echo)
         rp.table([rp.simulate(reqs, pol) for pol in policies], click.echo)
 
     @app.shell_context_processor

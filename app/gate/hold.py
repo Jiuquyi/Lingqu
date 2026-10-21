@@ -1,10 +1,16 @@
 """The gate: per-pool hold queue and release decisions (DESIGN §4.3, §4.5, §11.2).
 
 Every request asks `admit()` before it is forwarded. Under every limit it passes at once.
-Otherwise it is held in its pool's FIFO: a thread waits on the pool's Condition and re-checks
+Otherwise it is held in its pool's queue: a thread waits on the pool's Condition and re-checks
 `decide()` whenever something changes (a departure, a request finishing, an override, a reload)
 or a deadline it computed comes up. Holding sends no bytes to the client, so a request held
 too long can still get a clean 503.
+
+Over the money limit the queue head leaves one gap after the previous departure, and any held
+request leaves when its own cap runs out. The cap is `hold_cap_cached` for everyone, unless the
+pool is session-aware (M3): then a warm request's cap ends before its prompt cache expires, a
+cold request's is `hold_cap_cold`, and the head is the request whose cap ends first. With equal
+caps that order is plain FIFO.
 """
 import collections
 import itertools
@@ -15,6 +21,7 @@ from dataclasses import dataclass, field
 from .fifo import gap as fifo_gap, step_for
 from .limits import Counts
 from .phase import Phase
+from .sessions import CACHE_MARGIN, COLD, NONE, SessionClock
 from .window import BUCKET, Counters
 
 WAITS_KEPT = 3600  # seconds of hold times kept for the p50 / max in /status
@@ -33,6 +40,11 @@ class Ticket:
     count_scopes: list = field(default_factory=list)
     seq: int = 0
     cancelled: bool = False
+    session: str = ""
+    cache: str = ""             # warm | cold | none: the session's prompt cache at arrival
+    since: float | None = None  # seconds since the session's previous request went upstream
+    waiting_for: str = ""       # while held: money | concurrency | rpm
+    shadow: str = ""            # the rule kind a shadow rule would have held it for
 
     @property
     def rejected(self):
@@ -49,6 +61,7 @@ class PoolState:
         self.override = None            # {"action": "lift" | "limit", "value": float, "until": ts}
         self.shown = ("open", None)     # last state reported as an event: (state, step `at`)
         self.waits = collections.deque()  # (t, seconds held) of requests that waited
+        self.shadow_hits = collections.deque()  # (t, rule kind) of requests a shadow rule would hold
 
 
 class Gate:
@@ -62,6 +75,7 @@ class Gate:
         self.closing = False
         self.errors = collections.deque()  # times of internal errors
         self.seq = itertools.count(1)
+        self.sessions = SessionClock()
 
     # ------------------------------------------------------------ configuration
 
@@ -147,13 +161,21 @@ class Gate:
         p = self.settings.pools.get(pool)
         return [r for r in (p.rules if p else []) if r.kind in ("concurrency", "rpm") and r.applies(model)]
 
-    def _count_block(self, st, rules, now):
-        """(enforcing rule that blocks or None, shadow rule that would block or None, retry at)."""
+    def _count_block(self, st, rules, now, t=None):
+        """(enforcing rule that blocks or None, shadow rule that would block or None, retry at).
+        With a ticket, requests held ahead of it for the same concurrency slot count as taken:
+        a slot that frees goes to whoever has waited for it longest."""
         block = shadow = None
         retry = None
+        ahead = None
         for r in rules:
             if r.kind == "concurrency":
-                over = st.counts.in_flight[r.scope_key] >= r.max
+                n = st.counts.in_flight[r.scope_key]
+                if t is not None and not r.shadow:
+                    if ahead is None:
+                        ahead = self._waiting_ahead(st, t)
+                    n += sum(1 for keys in ahead if r.scope_key in keys)
+                over = n >= r.max
             else:
                 n, free_at = st.counts.rpm(r.scope_key, now)
                 over = n >= r.max
@@ -166,23 +188,62 @@ class Gate:
                     block = r
         return block, shadow, retry
 
+    def _waiting_ahead(self, st, t):
+        """Concurrency scopes of the requests held before t that wait only for a slot."""
+        out = []
+        for u in st.queue:
+            if u is t:
+                break
+            if u.waiting_for == "concurrency":
+                out.append({r.scope_key for r in self._count_rules(u.pool, u.model) if r.kind == "concurrency"})
+        return out
+
+    # ------------------------------------------------------------ session-aware queue (DESIGN §4.5)
+
+    def session_aware(self, pool):
+        p = self.settings.pools.get(pool)
+        return any(r.kind == "hourly_cap" and r.session_aware and not r.shadow for r in (p.rules if p else []))
+
+    def cap(self, t, aware):
+        """Seconds t may be held before it goes whatever the ratio."""
+        s = self.settings
+        if not aware or t.cache in ("", NONE):
+            return s.hold_cap_cached
+        if t.cache == COLD:
+            # It rebuilds the cache anyway: let it wait longer, but never turn it away for waiting.
+            return min(s.hold_cap_cold, s.max_hold)
+        return max(0.0, min(s.hold_cap_cached, s.cache_ttl - CACHE_MARGIN - (t.since or 0.0)))
+
+    def order(self, t, aware):
+        """Queue order: arrival; session-aware, the end of each request's own cap first."""
+        return (t.arrival + self.cap(t, aware), t.seq) if aware else (0.0, t.seq)
+
     # ------------------------------------------------------------ decisions
 
     def decide(self, st, t, now, model):
-        """("go" | "cap" | "reject" | "wait", wake_at, message) for ticket t at time now."""
+        """("go" | "cap" | "reject" | "wait", wake_at, message) for ticket t at time now.
+        Money first, then the count limits: a request the money gate lets go still needs a slot."""
         s = self.settings
         if self.closing:
             return "reject", None, "lingqu is shutting down"
         waited = now - t.arrival
-        rules = self._count_rules(t.pool, model)
-        block, _, retry = self._count_block(st, rules, now)
+        verdict, wake, msg = self._money_decision(st, t, now, model, waited)
+        if verdict == "wait":
+            t.waiting_for = "money"
+        if verdict in ("reject", "wait"):
+            return verdict, wake, msg
+        block, _, retry = self._count_block(st, self._count_rules(t.pool, model), now, t)
         if block is not None:
             if block.on_exceed == "reject":
                 return "reject", None, f"{block.kind} limit {block.max} reached"
             if waited >= s.max_hold:
                 return "reject", None, f"{block.kind} limit {block.max} reached; waited {waited:.0f} s"
+            t.waiting_for = block.kind
             return "wait", min(x for x in (retry, t.arrival + s.max_hold) if x is not None), ""
+        return verdict, None, ""
 
+    def _money_decision(self, st, t, now, model, waited):
+        s = self.settings
         ratio, rule, limit, spent = self.money(t.pool, model, now)
         t.ratio = ratio
         if ratio < 1 or rule is None:
@@ -190,11 +251,13 @@ class Gate:
         why = f"pool {t.pool} spent ${spent:.2f} of ${limit:g} in the last hour"
         if rule.on_exceed == "reject":
             return "reject", None, why
-        if waited >= s.hold_cap_cached and s.hold_cap_cached <= s.max_hold:
+        aware = self.session_aware(t.pool)
+        cap = self.cap(t, aware)
+        if waited >= cap and cap <= s.max_hold:
             return "cap", None, ""
         if waited >= s.max_hold:
             return "reject", None, f"{why}; waited {waited:.0f} s"
-        deadlines = [t.arrival + min(s.hold_cap_cached, s.max_hold), (int(now // BUCKET) + 1) * BUCKET]
+        deadlines = [t.arrival + min(cap, s.max_hold), (int(now // BUCKET) + 1) * BUCKET]
         if rule.release == "phase":
             if st.phase is None:
                 st.phase = Phase(s.phase)
@@ -202,7 +265,7 @@ class Gate:
             if st.phase.passing():
                 return "go", None, ""
             return "wait", min(deadlines + [st.phase.until]), ""
-        head = st.queue[0] if st.queue else None
+        head = min(st.queue, key=lambda u: self.order(u, aware)) if st.queue else None
         if head is not None and head is not t:
             return "wait", min(deadlines), ""
         ready = (st.last_departure or 0) + fifo_gap(s.fifo, ratio)
@@ -210,11 +273,12 @@ class Gate:
             return "go", None, ""
         return "wait", min(deadlines + [ready]), ""
 
-    def admit(self, pool, model, gone=None):
+    def admit(self, pool, model, gone=None, session=""):
         """Block until the request may go; returns its Ticket (check `.rejected`).
-        gone: optional callable, true once the client has hung up (polled while held)."""
+        gone: optional callable, true once the client has hung up (polled while held).
+        session: the request's session (Claude Code session id or prompt_cache_key), or ''."""
         now = self.clock()
-        t = Ticket(pool=pool, model=model, arrival=now, seq=next(self.seq))
+        t = Ticket(pool=pool, model=model, arrival=now, seq=next(self.seq), session=session or "")
         try:
             return self._admit(t, gone)
         except Exception as e:  # a bug in the gate must not take the traffic down (DESIGN §4.7)
@@ -224,6 +288,8 @@ class Gate:
                 if st and t in st.queue:
                     st.queue.remove(t)
                     st.cond.notify_all()
+                if self.settings.fail_mode != "closed":
+                    self.sessions.started(pool, t.session, self.clock())
             t.message = f"gate error: {e}"
             if self.settings.fail_mode == "closed":
                 t.result = "rejected"
@@ -238,6 +304,7 @@ class Gate:
             st = self.state(t.pool)
             s = self.settings
             now = self.clock()
+            t.cache, t.since = self.sessions.classify(t.pool, t.session, now, s.cache_ttl)
             verdict, wake, msg = self.decide(st, t, now, t.model)
             queued_seqs = ()
             if verdict == "wait":
@@ -261,15 +328,20 @@ class Gate:
                         verdict, msg = "reject", "client went away while held"
             now = self.clock()
             t.held = now - t.arrival
+            t.waiting_for = ""
             if verdict == "reject":
                 t.result, t.message = "rejected", msg
                 self.on_event(pool=t.pool, event="rejected", ratio=t.ratio, detail={"message": msg, "held": round(t.held, 1)})
             else:
                 queued = t.seq in queued_seqs
                 t.result = "released_by_cap" if verdict == "cap" else ("held" if queued else "pass")
-                if t.result == "pass" and self._would_hold(st, t, now):
-                    t.result = "shadow_would_hold"
+                if t.result == "pass":
+                    t.shadow = self._would_hold(st, t, now)
+                    if t.shadow:
+                        t.result = "shadow_would_hold"
+                        st.shadow_hits.append((now, t.shadow))
                 st.last_departure = now
+                self.sessions.started(t.pool, t.session, now)
                 t.count_scopes = sorted({r.scope_key for r in self._count_rules(t.pool, t.model)} | {"*"})
                 st.counts.start(t.count_scopes, now)
                 st.cond.notify_all()
@@ -281,8 +353,11 @@ class Gate:
             return t
 
     def _would_hold(self, st, t, now):
+        """The kind of the shadow rule that would have held t, or ''."""
         _, shadow, _ = self._count_block(st, self._count_rules(t.pool, t.model), now)
-        return shadow is not None or self._shadow_money(t.pool, t.model, now)
+        if shadow is not None:
+            return shadow.kind
+        return "hourly_cap" if self._shadow_money(t.pool, t.model, now) else ""
 
     def finish(self, t):
         """The request's response ended (or failed): free its concurrency slot."""
@@ -367,11 +442,29 @@ class Gate:
                 "state": state, "step": step, "release": rule.release if rule else None,
                 "next_departure": next_departure,
                 "clear_at": self.counters.clear_at(pool, rule.scope_key, now, limit) if rule and limit else None,
-                "held": len(st.queue), "in_flight": st.counts.in_flight["*"],
+                "held": len(st.queue), "held_cold": sum(1 for u in st.queue if u.cache == COLD),
+                "in_flight": st.counts.in_flight["*"],
                 "wait_p50_1h": round(waits[len(waits) // 2], 1) if waits else None,
                 "wait_max_1h": round(waits[-1], 1) if waits else None,
                 "override": o,
+                "sessions": {"aware": self.session_aware(pool),
+                             "warm": self.sessions.active(pool, now, self.settings.cache_ttl)},
+                "concurrency": self._concurrency_status(pool, st, now),
             }
+
+    def _concurrency_status(self, pool, st, now):
+        """Pool-wide concurrency: what runs now, the hour's peak, the limits, and how many requests
+        a shadow rule would have held in the last hour (by rule kind) -- what to look at before
+        switching a shadow rule to enforce."""
+        p = self.settings.pools.get(pool)
+        rules = [r for r in (p.rules if p else []) if r.kind == "concurrency" and r.scope_model is None]
+        while st.shadow_hits and st.shadow_hits[0][0] < now - 3600:
+            st.shadow_hits.popleft()
+        would = collections.Counter(kind for _, kind in st.shadow_hits)
+        return {"in_flight": st.counts.in_flight["*"], "peak_1h": st.counts.peak("*", now),
+                "max": min((r.max for r in rules if not r.shadow), default=None),
+                "shadow_max": min((r.max for r in rules if r.shadow), default=None),
+                "would_hold_1h": dict(would)}
 
     def held_total(self):
         with self.lock:
