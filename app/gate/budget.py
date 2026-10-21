@@ -91,8 +91,8 @@ class Budgets:
         return "reject" if pct >= 98 else "minimum" if pct >= 90 else "normal"
 
     def windows(self, pool, now, fresh_only=False):
-        p = self.settings.pools[pool]
-        ttl = self.settings.upstreams[p.upstream].quota.get("stale_after", 360)
+        p = self.settings.pool_config(pool)
+        ttl = self.settings.upstreams[p.upstream].quota.get("stale_after", 360) if p.upstream else 360
         out = []
         for (name, connection, _), q in self.quotas.items():
             if name != pool or (p.connections and connection not in p.connections):
@@ -134,7 +134,7 @@ class Budgets:
         hour = local.replace(minute=0, second=0, microsecond=0).timestamp()
         key = (pool, rule.scope_key)
         freshness = tuple(sorted((q["connection"], q["window"], q["stale"]) for q in self.windows(pool, now)))
-        signature = (id(rule), hour, cycle["cycle_start"], self.revision.get(pool, 0), freshness)
+        signature = (repr(rule), hour, cycle["cycle_start"], self.revision.get(pool, 0), freshness)
         cached = self.cache.get(key)
         if cached is None or cached[0] != signature:
             trigger = self.trigger if cached is None else "hour"
@@ -174,6 +174,6 @@ class Budgets:
         return row
 
     def status(self, pool, now):
-        p = self.settings.pools.get(pool)
+        p = self.settings.pool_config(pool)
         rules = p.rules if p else []
         return [self.value(pool, r, now) for r in rules if r.kind == "hourly_budget"]

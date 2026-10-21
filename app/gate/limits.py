@@ -30,6 +30,15 @@ class Counts:
             q.popleft()
         return len(q), (q[0] + 60 if q else now)
 
+    def prune(self, now):
+        for scope in list(self.starts):
+            self.rpm(scope, now)
+            self.peak(scope, now)
+            if not self.starts[scope] and not self.levels[scope] and not self.in_flight[scope]:
+                del self.starts[scope]
+                self.levels.pop(scope, None)
+                self.in_flight.pop(scope, None)
+
     def peak(self, scope, now):
         """Most requests in flight at once in the last hour (at least the current count)."""
         q = self.levels[scope]

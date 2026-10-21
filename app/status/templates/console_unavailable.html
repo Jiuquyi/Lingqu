@@ -1,0 +1,7 @@
+{% extends 'console_base.html' %}
+{% block content %}
+<div class="alert alert-danger"><h1 class="h4">共享限流暂不可用</h1><p>请检查 Redis 连接，并确认所有实例使用同一份配置。</p></div>
+<form method="post" action="{{ url_for('status.console', section='config') }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><input type="hidden" name="action" value="reload"><button class="btn btn-primary">重新加载本实例配置</button>
+</form>
+{% endblock %}

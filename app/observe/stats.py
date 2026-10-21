@@ -75,12 +75,14 @@ def stats(period="24h", pool=None, now=None):
         q = q.filter(Ledger.pool == pool)
     rows = q.all()
     by = {"pool": collections.defaultdict(list), "model": collections.defaultdict(list),
-          "session": collections.defaultdict(list)}
+          "session": collections.defaultdict(list), "user": collections.defaultdict(list)}
     step = 3600 if period in ("today", "24h") else 86400
     series = collections.defaultdict(lambda: collections.defaultdict(float))
     for r in rows:
         by["pool"][r.pool].append(r)
         by["model"][r.model_actual or r.model_req or "-"].append(r)
+        if r.user_ref:
+            by["user"][r.user_ref].append(r)
         if r.session_tag:
             by["session"][r.session_tag].append(r)
         series[r.pool][int(r.ts // step * step)] += r.eusd or 0
@@ -88,6 +90,7 @@ def stats(period="24h", pool=None, now=None):
         "period": period, "from": int(start), "to": int(now),
         "total": summarize(rows),
         "pools": {k: summarize(v) for k, v in sorted(by["pool"].items())},
+        "users": {k: summarize(v) for k, v in sorted(by["user"].items())},
         "models": {k: summarize(v) for k, v in sorted(by["model"].items())},
         "sessions": {k: summarize(v) for k, v in sorted(by["session"].items(), key=lambda kv: -len(kv[1]))[:50]},
         "series": {"step": step, "pools": {p: sorted((t, round(v, 4)) for t, v in s.items())

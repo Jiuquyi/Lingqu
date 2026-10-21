@@ -143,18 +143,29 @@ def restore_counters(app, gate, clock=time.time):
         # since - 3600 is at least an hour back: far enough for every cache that can still be warm.
         rows = Ledger.query.filter(Ledger.ts >= since - 3600).all()
         with gate.lock:
-            for r in rows:
-                if r.session_tag and r.gate_result != "rejected":
-                    gate.sessions.started(r.pool, r.session_tag, r.ts + (r.held_ms or 0) / 1000)
+            for r in sorted(rows, key=lambda row: row.ts + (row.held_ms or 0) / 1000):
+                if r.gate_result != "rejected":
+                    if r.session_tag:
+                        gate.sessions.started(r.pool, r.session_tag, r.ts + (r.held_ms or 0) / 1000)
+                    departure = r.ts + (r.held_ms or 0) / 1000
+                    if departure > now - 60:
+                        for pool in [r.pool] + (["@user/" + r.user_ref] if r.user_ref else []):
+                            scopes = sorted({x.scope_key for x in gate._count_rules(pool, r.model_req or r.model_actual)} |
+                                            {"*", "actual=" + (r.model_req or r.model_actual or "")})
+                            counts = gate.state(pool).counts
+                            counts.start(scopes, departure)
+                            counts.finish(scopes)
+                    if r.user_ref:
+                        gate.sessions.started("@user/" + r.user_ref, r.session_tag, r.ts + (r.held_ms or 0) / 1000)
         for r in rows:
-            model = r.model_actual or r.model_req
+            model = r.model_req or r.model_actual
             first = r.eusd_input or 0
             start = r.counted_at or r.ts
             end = r.accounted_at or (r.ts + ((r.held_ms or 0) + (r.duration_ms or 0)) / 1000)
             if (start > since if saved_at is not None else start >= since) and first:
-                gate.charge(r.pool, model, first, start, history=False)
+                gate.charge(r.pool, model, first, start, history=False, user=r.user_ref or "")
             if (end > since if saved_at is not None else end >= since) and (r.eusd or 0) - first > 0:
-                gate.charge(r.pool, model, (r.eusd or 0) - first, end, history=False)
+                gate.charge(r.pool, model, (r.eusd or 0) - first, end, history=False, user=r.user_ref or "")
             restored += 1
     restore_history(app, gate.counters, clock)
     return restored
@@ -173,12 +184,14 @@ def restore_history(app, counters, clock=time.time):
         # Include newly added models that have no snapshot, and requests crossing a checkpoint.
         rows = Ledger.query.filter(Ledger.ts >= now - HISTORY_SPAN - 3600).yield_per(1000)
         for r in rows:
-            model = r.model_actual or r.model_req or ""
-            cutoff = saved.get((r.pool, model), now - HISTORY_SPAN)
+            model = r.model_req or r.model_actual or ""
+            targets = [r.pool] + (["@user/" + r.user_ref] if r.user_ref else [])
             first = r.eusd_input or 0
             start = r.counted_at or r.ts
             end = r.accounted_at or (r.ts + ((r.held_ms or 0) + (r.duration_ms or 0)) / 1000)
-            if start > cutoff and first:
-                counters.add_history(r.pool, model, start, first, now)
-            if end > cutoff and (r.eusd or 0) > first:
-                counters.add_history(r.pool, model, end, r.eusd - first, now)
+            for pool in targets:
+                cutoff = saved.get((pool, model), now - HISTORY_SPAN)
+                if start > cutoff and first:
+                    counters.add_history(pool, model, start, first, now)
+                if end > cutoff and (r.eusd or 0) > first:
+                    counters.add_history(pool, model, end, r.eusd - first, now)

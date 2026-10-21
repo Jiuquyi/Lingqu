@@ -66,3 +66,9 @@ typing-extensions==4.16.0
     #   sqlalchemy
 werkzeug==3.1.9
     # via flask
+redis==6.4.0
+    # via -r requirements/base.in
+psycopg[binary]==3.3.6
+    # via -r requirements/base.in
+psycopg-binary==3.3.6
+    # via psycopg

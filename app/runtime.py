@@ -1,4 +1,4 @@
-"""The single in-process state of a Lingqu instance (DESIGN §11.2): settings, gate, prices,
+"""The runtime of a Lingqu worker with optional Redis admission coordination (DESIGN §11.2): settings, gate, prices,
 ledger writer, alerts and the dashboard gate, plus the background threads that keep them."""
 import logging
 import threading
@@ -14,9 +14,10 @@ from .ledger import LedgerWriter, restore_counters, save_counters
 from .observe.notify import Notifier
 from .pricing.sync import Pricing
 from .quota import QuotaCollector
+from .manager import Manager
 
 log = logging.getLogger("lingqu")
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 # Error classes that need a person, alerted when a pool sees them several times in a row.
 ALERT_CLASSES = {"account_auth": "upstream account authorization failed; re-authorize it in 9router",
                  "router_unreachable": "cannot connect to 9router"}
@@ -28,11 +29,17 @@ class Runtime:
         self.settings = settings
         self.notifier = Notifier(settings.webhook, clock=clock)
         self.ledger = LedgerWriter(app, clock=clock)
-        self.gate = Gate(settings, Counters(), clock=clock, on_event=self._gate_event)
+        if settings.redis:
+            from .gate.shared import RedisGate
+            self.gate = RedisGate(settings, clock=clock, on_event=self._gate_event)
+        else:
+            self.gate = Gate(settings, Counters(), clock=clock, on_event=self._gate_event)
         self.pricing = Pricing(app, settings, clock=clock)
         self.pricing.on_unpriced = self._unpriced
         self.gate.budgets.on_snapshot = self.ledger.add_budget
         self.quota = QuotaCollector(self)
+        self.manager = Manager(self)
+        self._share_sessions()
         self.exposure = Exposure(app, settings, clock=clock, on_change=self._exposure_change)
         self.clients = {}
         self.client_lock = threading.Lock()
@@ -41,6 +48,13 @@ class Runtime:
         self.stop = threading.Event()
         self.last_errors = {}       # pool -> {"class", "at", "count"}
         self.started_at = clock()
+
+    def _share_sessions(self):
+        sessions = [self.pricing.session] + list(self.quota.sessions.values()) + [
+            adapter.session for adapter in self.manager.adapters.values()]
+        for session in sessions:
+            if session is not None:
+                session.shared = self.settings.redis or None
 
     # ------------------------------------------------------------ upstream clients
 
@@ -135,13 +149,23 @@ class Runtime:
     def reload(self, path=None):
         """Validate, then swap in a new config; the old one stays on any error (DESIGN §8.3)."""
         new, errors, warnings = settings_mod.load(path or self.settings.path)
+        if not errors and new.redis != self.settings.redis:
+            errors.append("redis settings require a coordinated restart")
+        if not errors and (new.proxy_port != self.settings.proxy_port or new.status_port != self.settings.status_port or
+                           new.dashboard_ports() != self.settings.dashboard_ports() or new.dsn != self.settings.dsn):
+            errors.append("database and listening port changes require a restart")
         if errors:
             return False, errors, warnings
         with self.quota.lock:
+            try:
+                self.gate.reload(new)
+            except Exception:
+                return False, ["shared state unavailable: configuration was not reloaded"], warnings
             self.settings = new
-            self.gate.reload(new)
             self.pricing.configure(new)
             self.quota.configure()
+            self.manager.configure()
+            self._share_sessions()
         self.exposure.configure(new)
         self.notifier.webhook = new.webhook
         with self.client_lock:
@@ -157,13 +181,14 @@ class Runtime:
         except Exception as e:
             log.warning("loading the price snapshot failed: %s", e)
         try:
-            n = restore_counters(self.app, self.gate, clock=self.clock)
+            n = 0 if self.settings.redis else restore_counters(self.app, self.gate, clock=self.clock)
             log.info("rolling windows and sessions restored (%d ledger rows replayed)", n)
         except Exception as e:
             log.warning("restoring the rolling windows failed: %s", e)
         self.exposure.load()
         try:
-            self.quota.load()
+            if not self.settings.redis:
+                self.quota.load()
         except Exception as e:
             log.warning("loading upstream quotas failed: %s", e)
 
@@ -201,10 +226,14 @@ class Runtime:
         self.restore()
         self._loop("ledger", 0, self.ledger.run_once)
         self._loop("pricing", 30, self._price_tick)
-        self._loop("counters", 60, lambda: save_counters(self.app, self.gate.counters, clock=self.clock))
+        if self.settings.redis:
+            self._loop("leases", 10, self.gate.renew)
+        else:
+            self._loop("counters", 60, lambda: save_counters(self.app, self.gate.counters, clock=self.clock))
         self._loop("gate", 15, self._gate_tick)
         self._loop("quota", 15, self.quota.tick)
         self._loop("notify", 0, self.notifier.run_once)
+        self._loop("manager", 15, self.manager.tick)
 
     def shutdown(self):
         """SIGTERM: held requests get a 503 at once; streams already running carry on."""
@@ -215,14 +244,16 @@ class Runtime:
         self.stop.set()
         try:
             self.ledger.flush()
-            save_counters(self.app, self.gate.counters, clock=self.clock)
+            if not self.settings.redis:
+                save_counters(self.app, self.gate.counters, clock=self.clock)
         except Exception as e:
             log.warning("flush on exit failed: %s", e)
 
     def health(self):
         now = self.clock()
         stale_threads = [n for n, t in self.heartbeats.items() if now - t > 180]
-        return {"ok": not stale_threads and self.ledger.lag() < 120,
+        shared = self.gate.health() if self.settings.redis else {"ok": True, "backend": "memory"}
+        return {"ok": not stale_threads and self.ledger.lag() < 120 and shared["ok"], "coordination": shared,
                 "threads": {n: round(now - t) for n, t in self.heartbeats.items()},
                 "stale_threads": stale_threads, "ledger_lag_sec": self.ledger.lag(),
                 "ledger_dropped": self.ledger.dropped, "pricing_stale": self.pricing.stale()}

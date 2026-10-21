@@ -1,0 +1,239 @@
+{% extends 'console_base.html' %}
+{% macro csrf() %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endmacro %}
+{% macro action(name,label,upstream='') %}<form method="post" class="d-inline">{{ csrf() }}<input type="hidden" name="action" value="{{ name }}">
+<input type="hidden" name="upstream" value="{{ upstream }}">
+<button class="btn btn-sm btn-outline-primary mb-1">{{ label }}</button>
+</form>{% endmacro %}
+{% macro rule_table(rules,metrics=[]) %}<div class="table-responsive">
+<table class="table table-sm">
+<thead>
+<tr>
+<th>规则</th>
+<th>模型范围</th>
+<th>额度 / 数量</th>
+<th>当前计量</th>
+<th>超限</th>
+<th>模式</th>
+</tr>
+</thead>
+<tbody>{% for r in rules %}<tr>
+<td>{{ r.kind }}</td>
+<td>{{ r.scope_model or '全部' }}</td>
+<td>{{ r.limit if r.kind=='hourly_cap' else r.cycle_limit if r.kind in ['hourly_budget','cycle_cap'] else r.max }}</td>
+<td>{% if loop.index0 < metrics|length %}{% set m = metrics[loop.index0] %}{{ m.get("spent",m.get("used_cycle",m.get("in_flight",m.get("requests","—")))) }}{% else %}—{% endif %}</td>
+<td>{{ r.on_exceed }} / {{ r.release }}</td>
+<td>{{ 'shadow' if r.shadow else 'enforce' }}</td>
+</tr>{% else %}<tr>
+<td colspan="6" class="text-secondary">只计量</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>{% endmacro %}
+{% block logout %}<form method="post" action="{{ url_for('status.console_logout') }}">{{ csrf() }}<button class="btn btn-outline-light btn-sm">退出登录</button>
+</form>{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
+<h1 class="h3">运行管理</h1>
+<span class="badge text-bg-{{ 'success' if health.ok else 'danger' }}">{{ '服务正常' if health.ok else '服务异常' }} · {{ health.coordination.backend }} · v{{ state.version }}</span>
+</div>
+<nav class="nav nav-pills gap-1 mb-4" aria-label="控制台导航">{% for key,label in [('overview','总览'),('pools','池与规则'),('users','用户限流'),('routers','9router'),('pricing','价格'),('stats','用量'),('events','事件'),('config','配置')] %}<a class="nav-link {{ 'active' if section==key }}" href="{{ url_for('status.console',section=key) }}">{{ label }}</a>{% endfor %}</nav>
+{% if section=='overview' %}
+<div class="row g-3 mb-4">{% for label,value in [('池数',state.pools|length),('排队请求',state.health.held),('账本延迟（秒）',state.health.ledger_lag_sec),('闸门错误 / 小时',state.health.gate_errors_1h)] %}<div class="col-6 col-lg-3">
+<div class="card h-100">
+<div class="card-body">
+<div class="text-secondary">{{ label }}</div>
+<div class="fs-2">{{ value }}</div>
+</div>
+</div>
+</div>{% endfor %}</div>
+<h2 class="h5">池状态</h2>
+<div class="table-responsive">
+<table class="table table-hover bg-white">
+<thead>
+<tr>
+<th>池</th>
+<th>状态</th>
+<th>小时费用 eUSD</th>
+<th>限额</th>
+<th>进行中 / 排队</th>
+<th>额度刹车</th>
+</tr>
+</thead>
+<tbody>{% for p in state.pools %}<tr>
+<td>{{ p.name }}</td>
+<td>{{ p.state }}</td>
+<td>{{ p.spent_1h }}</td>
+<td>{{ p.limit or '—' }}</td>
+<td>{{ p.in_flight }} / {{ p.held }}</td>
+<td>{{ p.brake }}</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+<p class="text-secondary">价格同步：{{ state.pricing.synced_at|when }} · {{ state.pricing.source }}{% if state.pricing.stale %} · 价格已过期{% endif %}</p>
+{% elif section=='pools' %}
+{% for p in state.pools %}<section class="card mb-3">
+<div class="card-body">
+<h2 class="h5">{{ p.name }} <span class="badge text-bg-secondary">{{ p.state }}</span>
+</h2>
+<p class="text-secondary">{{ p.upstream }} · {{ p.kind }} · ${{ p.spent_1h }} / 小时 · 并发 {{ p.in_flight }} · 排队 {{ p.held }}</p>{{ rule_table(settings.pools[p.name].rules,p.rules) }}<form method="post" class="row g-2 align-items-end">{{ csrf() }}<input type="hidden" name="action" value="override">
+<input type="hidden" name="pool" value="{{ p.name }}">
+<div class="col-sm-3">
+<label class="form-label" for="mode-{{ loop.index }}">临时覆盖</label>
+<select id="mode-{{ loop.index }}" name="mode" class="form-select">
+<option value="limit">收紧限额</option>
+<option value="lift">解除金额限额</option>
+<option value="clear">撤销覆盖</option>
+</select>
+</div>
+<div class="col-sm-3">
+<label class="form-label" for="value-{{ loop.index }}">小时限额 eUSD</label>
+<input id="value-{{ loop.index }}" name="value" type="number" step="any" min="0" class="form-control" value="{{ p.limit or 20 }}">
+</div>
+<div class="col-sm-3">
+<label class="form-label" for="duration-{{ loop.index }}">持续时间</label>
+<input id="duration-{{ loop.index }}" name="duration" class="form-control" value="30m" required>
+</div>
+<div class="col-sm-3">
+<button class="btn btn-primary">应用覆盖</button>
+</div>
+</form>{% if p.override %}<p class="mt-2 mb-0">当前覆盖：{{ p.override|describe }}</p>{% endif %}</div>
+</section>{% endfor %}
+{% elif section=='users' %}
+<p class="text-secondary">身份由服务端 key 绑定；同一用户跨 key、跨池累计。请求体中的 user 不参与鉴权。</p>{% for u in users %}<section class="card mb-3">
+<div class="card-body">
+<h2 class="h5">{{ u.name }}</h2>
+<p>状态 {{ u.state }} · 小时费用 ${{ u.spent_1h }} · 并发 {{ u.in_flight }} · 排队 {{ u.held }}</p>{{ rule_table(u.rules,u.metrics) }}</div>
+</section>{% else %}<div class="alert alert-info">尚未配置用户。在 YAML 中添加 users，并为 keys 指定 user。</div>{% endfor %}
+{% elif section=='routers' %}
+<div class="mb-3">{{ action('manager','同步全部实例') }} {{ action('quota','同步池额度') }}</div>
+{% for row in routers %}<section class="card mb-3">
+<div class="card-body">
+<div class="d-flex justify-content-between">
+<h2 class="h5">{{ row.upstream }}</h2>
+<span class="badge text-bg-{{ 'warning' if row.stale else 'success' }}">{{ '待同步 / 部分失败' if row.stale else '已同步' }}</span>
+</div>
+<p>最近成功：{{ row.synced_at|default(none)|when }} · 健康 {{ '正常' if row.health.ok else '异常 / 未检查' }} · 延迟 {{ row.health.latency_ms|default('—') }} ms</p>{{ action('manager','同步此实例',row.upstream) }}{% if row.upstream in state.dashboards %}{{ action('dashboard_open','临时打开 Dashboard',row.upstream) }}{% if settings.upstreams[row.upstream].dashboard.allow_persistent %}{{ action('dashboard_persist','保持打开',row.upstream) }}{% endif %}{{ action('dashboard_close','关闭入口',row.upstream) }}<a class="btn btn-sm btn-outline-secondary mb-1" href="{{ dashboard_urls[row.upstream] }}" target="_blank" rel="noopener">访问 Dashboard</a>
+<p>入口：{{ state.dashboards[row.upstream].state }} · 到期 {{ state.dashboards[row.upstream].until|when }}</p>{% endif %}
+{% for key,error in row.errors.items() %}<div class="alert alert-warning mt-2">{{ key }}：{{ error }}</div>{% endfor %}{% for item in row.duplicate_connections|default([]) %}<div class="alert alert-danger">连接 {{ item.connection }} 同时出现在 {{ item.upstream }}，请核对账号隔离。</div>{% endfor %}
+<h3 class="h6 mt-3">账号连接</h3>
+<div class="table-responsive">
+<table class="table table-sm">
+<thead>
+<tr>
+<th>Provider</th>
+<th>名称 / ID</th>
+<th>启用</th>
+<th>测试状态</th>
+<th>Token 到期</th>
+</tr>
+</thead>
+<tbody>{% for c in row.connections|default([]) %}<tr>
+<td>{{ c.provider }}</td>
+<td>{{ c.name|default(c.id) }}</td>
+<td>{{ c.isActive|default(true) }}</td>
+<td>{{ c.testStatus|default('—') }}</td>
+<td>{{ c.expiresAt|default('—') }}</td>
+</tr>{% else %}<tr>
+<td colspan="5">没有连接快照</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+<details>
+<summary>模型与组合（{{ row.models|default([])|length }} / {{ row.combos|default([])|length }}）</summary>
+<pre class="bg-light p-3 mt-2">{{ {'models':row.models|default([]),'combos':row.combos|default([]),'routing':row.routing|default([]),'usage':row.usage|default({}),'reconciliation':row.reconciliation|default({})}|tojson(indent=2) }}</pre>
+</details>
+</div>
+</section>{% else %}<div class="alert alert-info">在 upstreams 中配置 manager.password 后启用管理器。</div>{% endfor %}
+{% elif section=='pricing' %}
+{{ action('pricing','立即同步价格') }}<p class="text-secondary mt-2">单位：美元 / 百万 token。最近同步 {{ state.pricing.synced_at|when }}</p>
+<div class="table-responsive">
+<table class="table table-striped">
+<thead>
+<tr>
+<th>模型</th>
+<th>输入</th>
+<th>输出</th>
+<th>缓存读取</th>
+<th>缓存写入 5m</th>
+</tr>
+</thead>
+<tbody>{% for model,p in prices %}<tr>
+<td>{{ model }}</td>
+<td>{{ p.input }}</td>
+<td>{{ p.output }}</td>
+<td>{{ p.cache_read|default('—') }}</td>
+<td>{{ p.cache_write_5m|default('—') }}</td>
+</tr>{% else %}<tr>
+<td colspan="5">尚无价格快照</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+{% elif section=='stats' %}
+<nav class="nav mb-3">{% for p in ['today','24h','7d','30d'] %}<a class="nav-link {{ 'fw-bold' if period==p }}" href="{{ url_for('status.console',section='stats',period=p) }}">{{ p }}</a>{% endfor %}</nav>
+<p>请求 {{ stats.total.requests }} · 费用 ${{ stats.total.eusd }} · 错误 {{ stats.total.errors }} · 缓存命中 {{ stats.total.cache_hit_rate|percent }}</p>
+<div class="table-responsive">
+<table class="table">
+<thead>
+<tr>
+<th>池</th>
+<th>请求</th>
+<th>费用 eUSD</th>
+<th>错误</th>
+<th>缓存命中</th>
+<th>等待 P50（秒）</th>
+</tr>
+</thead>
+<tbody>{% for name,s in stats.pools.items() %}<tr>
+<td>{{ name }}</td>
+<td>{{ s.requests }}</td>
+<td>{{ s.eusd }}</td>
+<td>{{ s.errors }}</td>
+<td>{{ s.cache_hit_rate|percent }}</td>
+<td>{{ s.held.p50 or '—' }}</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+{% elif section=='events' %}
+<h2 class="h5">最近 100 条事件</h2>
+<div class="table-responsive">
+<table class="table table-sm">
+<thead>
+<tr>
+<th>时间</th>
+<th>池</th>
+<th>事件</th>
+<th>详情</th>
+</tr>
+</thead>
+<tbody>{% for e in events %}<tr>
+<td class="text-nowrap">{{ e.ts|when }}</td>
+<td>{{ e.pool or '—' }}</td>
+<td>{{ e.event }}</td>
+<td>{{ e.detail|describe }}</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+{% elif section=='config' %}
+<div class="card">
+<div class="card-body">
+<h2 class="h5">配置与路由</h2>
+<p>配置文件：{{ settings.path or '测试配置' }} · 代理端口 {{ settings.proxy_port }} · 管理端口 {{ settings.status_port }} · 存储模式 {{ health.coordination.backend }}</p>{{ action('reload','验证并重新加载配置') }}<p class="text-secondary mt-3">YAML 是规则来源。监听端口、数据库和 Redis 连接变更需要重启；Redis 模式下所有实例必须加载同一份配置。</p>
+<div class="table-responsive">
+<table class="table">
+<thead>
+<tr>
+<th>池</th>
+<th>模型匹配</th>
+<th>优先级（较大优先）</th>
+</tr>
+</thead>
+<tbody>{% for p in settings.pools.values() %}<tr>
+<td>{{ p.name }}</td>
+<td>{{ p.match|join(', ') or '专用 key' }}</td>
+<td>{{ p.priority }}</td>
+</tr>{% endfor %}</tbody>
+</table>
+</div>
+</div>
+</div>
+{% endif %}
+{% endblock %}

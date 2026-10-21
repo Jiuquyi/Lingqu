@@ -40,6 +40,16 @@ def run(app, echo, live=False, path=None):
         return r
     r.ok(f"{s.path}: {len(s.upstreams)} upstreams, {len(s.pools)} pools, {len(s.keys)} keys")
 
+    if s.redis:
+        try:
+            from redis import Redis
+            client = Redis.from_url(s.redis["url"], socket_timeout=s.redis["socket_timeout"])
+            client.ping()
+            client.close()
+            r.ok("Redis reachable; shared admission enabled")
+        except Exception:
+            r.fail("Redis unreachable; shared admission will reject new requests")
+
     echo("2. upstreams")
     models = {}
     for u in s.upstreams.values():
