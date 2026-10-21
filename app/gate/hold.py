@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass, field
 
 from .fifo import gap as fifo_gap, step_for
+from .budget import Budgets
 from .limits import Counts
 from .phase import Phase
 from .sessions import CACHE_MARGIN, COLD, NONE, SessionClock
@@ -62,6 +63,7 @@ class PoolState:
         self.shown = ("open", None)     # last state reported as an event: (state, step `at`)
         self.waits = collections.deque()  # (t, seconds held) of requests that waited
         self.shadow_hits = collections.deque()  # (t, rule kind) of requests a shadow rule would hold
+        self.brake_shown = "normal"
 
 
 class Gate:
@@ -76,6 +78,7 @@ class Gate:
         self.errors = collections.deque()  # times of internal errors
         self.seq = itertools.count(1)
         self.sessions = SessionClock()
+        self.budgets = Budgets(settings, self.counters)
 
     # ------------------------------------------------------------ configuration
 
@@ -88,6 +91,7 @@ class Gate:
     def reload(self, settings):
         with self.lock:
             self.settings = settings
+            self.budgets.configure(settings)
             for name in [n for n in self.pools if n not in settings.pools and not self.pools[n].queue]:
                 del self.pools[name]
             for st in self.pools.values():
@@ -98,6 +102,7 @@ class Gate:
         with self.lock:
             st = self.state(pool)
             st.override = None if action == "clear" else {"action": action, "value": value, "until": until}
+            self.budgets.invalidate("override")
             st.cond.notify_all()
         self.on_event(pool=pool, event="override", detail={"action": action, "value": value, "until": until})
 
@@ -115,13 +120,40 @@ class Gate:
         p = self.settings.pools.get(pool)
         out = ["*"]
         for r in (p.rules if p else []):
-            if r.kind == "hourly_cap" and r.scope_model and r.applies(model) and r.scope_key not in out:
+            if r.kind in ("hourly_cap", "hourly_budget", "cycle_cap") and r.scope_model and r.applies(model) and r.scope_key not in out:
                 out.append(r.scope_key)
         return out
 
-    def charge(self, pool, model, amount, t=None):
-        now = self.clock()
-        self.counters.add(pool, self.scopes(pool, model), now if t is None else t, amount, now)
+    def charge(self, pool, model, amount, t=None, history=True):
+        with self.lock:
+            with self.counters.lock:
+                now = self.clock()
+                charged_at = now if t is None else t
+                self.counters.add(pool, self.scopes(pool, model), charged_at, amount, now)
+                if history:
+                    self.counters.add_history(pool, model, charged_at, amount, now)
+            self.state(pool).cond.notify_all()
+            return charged_at
+
+    def update_quota(self, pool, connection, windows, source="api", persist=None):
+        with self.lock:
+            self.budgets.update(pool, connection, windows, self.clock(), source, persist)
+            st = self.state(pool)
+            self._observe(pool, st, self.clock())
+            st.cond.notify_all()
+
+    def _hard_reason(self, pool, model, now, shadow=False):
+        p = self.settings.pools.get(pool)
+        rules = [r for r in (p.rules if p else []) if r.kind in ("hourly_budget", "cycle_cap")
+                 and r.shadow == shadow and r.applies(model)]
+        if rules and self.budgets.emergency(pool, now, model) == "reject":
+            return "emergency brake: upstream quota used >= 98%"
+        for r in rules:
+            if r.kind == "cycle_cap" and self.budgets.cycle(pool, r, now)["used_cycle"] >= r.cycle_limit - 1e-9:
+                return f"cycle_cap {r.cycle_limit:g} reached"
+            if r.kind == "hourly_budget" and self.budgets.value(pool, r, now)["s_rem"] == 0:
+                return "hourly_budget: short-window allowance exhausted"
+        return ""
 
     def _override(self, st, now):
         o = st.override
@@ -134,28 +166,43 @@ class Gate:
         p = self.settings.pools.get(pool)
         st = self.state(pool)
         o = self._override(st, now)
-        if o and o["action"] == "lift":
+        protect = p and any(r.kind == "hourly_budget" and not r.shadow and r.applies(model) for r in p.rules)
+        if o and o["action"] == "lift" and (not protect or self.budgets.emergency(pool, now, model) == "normal"):
             return 0.0, None, None, self.counters.spent(pool, "*", now)
         best = (0.0, None, None, self.counters.spent(pool, "*", now))
-        rules = [r for r in (p.rules if p else []) if r.kind == "hourly_cap" and not r.shadow and r.applies(model)]
+        rules = [r for r in (p.rules if p else []) if r.kind in ("hourly_cap", "hourly_budget") and not r.shadow and r.applies(model)]
         if o and o["action"] == "limit" and not any(r.scope_model is None for r in rules):
             from ..settings import Rule
             rules.append(Rule(kind="hourly_cap", limit=o["value"]))
         for r in rules:
-            limit = o["value"] if (o and o["action"] == "limit" and r.scope_model is None) else r.limit
-            spent = self.counters.spent(pool, r.scope_key, now)
-            ratio = spent / limit if limit else 0.0
+            limit = self.budgets.value(pool, r, now)["h_value"] if r.kind == "hourly_budget" else r.limit
+            if o and o["action"] == "limit" and r.scope_model is None:
+                limit = o["value"]
+                if r.kind == "hourly_budget":
+                    budget = self.budgets.value(pool, r, now)
+                    if budget["brake"] != "normal":
+                        limit = min(limit, r.h_min)
+                    if budget["s_rem"] is not None:
+                        limit = min(limit, budget["s_rem"])
+            spent = self._spent(pool, r, now)
+            ratio = spent / limit if limit else max(1.0, spent / 1e-12)
             if best[1] is None or ratio > best[0]:
                 best = (ratio, r, limit, spent)
         return best
 
+    def _spent(self, pool, rule, now):
+        if rule.kind == "hourly_budget":
+            return self.counters.total_since(pool, rule.scope_model, (int(now // BUCKET) - 59) * BUCKET, now)
+        return self.counters.spent(pool, rule.scope_key, now)
+
     def _shadow_money(self, pool, model, now):
         p = self.settings.pools.get(pool)
         for r in (p.rules if p else []):
-            if r.kind == "hourly_cap" and r.shadow and r.applies(model) and r.limit:
-                if self.counters.spent(pool, r.scope_key, now) >= r.limit:
-                    return True
-        return False
+            if r.kind in ("hourly_cap", "hourly_budget") and r.shadow and r.applies(model):
+                limit = self.budgets.value(pool, r, now)["h_value"] if r.kind == "hourly_budget" else r.limit
+                if self._spent(pool, r, now) >= limit:
+                    return r.kind
+        return ""
 
     def _count_rules(self, pool, model):
         p = self.settings.pools.get(pool)
@@ -202,7 +249,7 @@ class Gate:
 
     def session_aware(self, pool):
         p = self.settings.pools.get(pool)
-        return any(r.kind == "hourly_cap" and r.session_aware and not r.shadow for r in (p.rules if p else []))
+        return any(r.kind in ("hourly_cap", "hourly_budget") and r.session_aware and not r.shadow for r in (p.rules if p else []))
 
     def cap(self, t, aware):
         """Seconds t may be held before it goes whatever the ratio."""
@@ -226,6 +273,9 @@ class Gate:
         s = self.settings
         if self.closing:
             return "reject", None, "lingqu is shutting down"
+        reason = self._hard_reason(t.pool, model, now)
+        if reason:
+            return "reject", None, reason
         waited = now - t.arrival
         verdict, wake, msg = self._money_decision(st, t, now, model, waited)
         if verdict == "wait":
@@ -357,7 +407,9 @@ class Gate:
         _, shadow, _ = self._count_block(st, self._count_rules(t.pool, t.model), now)
         if shadow is not None:
             return shadow.kind
-        return "hourly_cap" if self._shadow_money(t.pool, t.model, now) else ""
+        if self._hard_reason(t.pool, t.model, now, shadow=True):
+            return "cycle_or_quota"
+        return self._shadow_money(t.pool, t.model, now)
 
     def finish(self, t):
         """The request's response ended (or failed): free its concurrency slot."""
@@ -380,6 +432,15 @@ class Gate:
 
     def _observe(self, pool, st, now):
         """Emit a gate event when the pool enters, changes step in or leaves throttling."""
+        p = self.settings.pools.get(pool)
+        if p:
+            brake = self.budgets.emergency(pool, now)
+            if brake != st.brake_shown:
+                st.brake_shown = brake
+                enforcing = any(r.kind in ("hourly_budget", "cycle_cap") and not r.shadow for r in p.rules)
+                self.on_event(pool=pool, event="quota_" + ("recovered" if brake == "normal" else brake),
+                              detail={"message": f"upstream quota brake: {brake}",
+                                      "mode": "enforce" if enforcing else "shadow"})
         ratio, rule, limit, spent = self.money(pool, "", now)
         if st.override and st.override["action"] == "lift":
             shown = ("override", None)
@@ -407,6 +468,9 @@ class Gate:
         """Called periodically: report throttles that ended with no traffic, wake sleepers."""
         with self.lock:
             now = self.clock()
+            for name in self.settings.pools:
+                self.state(name)
+                self.budgets.status(name, now)
             for name, st in list(self.pools.items()):
                 self._observe(name, st, now)
                 if st.queue:
@@ -418,7 +482,10 @@ class Gate:
             st = self.state(pool)
             ratio, rule, limit, spent = self.money(pool, "", now)
             o = self._override(st, now)
-            if o and o["action"] == "lift":
+            hard_reason = self._hard_reason(pool, "", now)
+            if hard_reason:
+                state = "rejected"
+            elif o and o["action"] == "lift" and self.budgets.emergency(pool, now) == "normal":
                 state = "override"
             elif rule is not None and ratio >= 1:
                 state = "queuing"
@@ -450,6 +517,13 @@ class Gate:
                 "sessions": {"aware": self.session_aware(pool),
                              "warm": self.sessions.active(pool, now, self.settings.cache_ttl)},
                 "concurrency": self._concurrency_status(pool, st, now),
+                "budget": self.budgets.status(pool, now) or None,
+                "cycles": [dict(self.budgets.cycle(pool, r, now), scope_key=r.scope_key,
+                                limit=r.cycle_limit, mode="shadow" if r.shadow else "enforce")
+                           for r in self.settings.pools[pool].rules if r.kind == "cycle_cap"]
+                           if pool in self.settings.pools else [],
+                "brake": self.budgets.emergency(pool, now) if pool in self.settings.pools else "normal",
+                "reject_reason": hard_reason or None,
             }
 
     def _concurrency_status(self, pool, st, now):

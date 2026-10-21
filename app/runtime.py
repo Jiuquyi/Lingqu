@@ -13,9 +13,10 @@ from .gate.window import Counters
 from .ledger import LedgerWriter, restore_counters, save_counters
 from .observe.notify import Notifier
 from .pricing.sync import Pricing
+from .quota import QuotaCollector
 
 log = logging.getLogger("lingqu")
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 # Error classes that need a person, alerted when a pool sees them several times in a row.
 ALERT_CLASSES = {"account_auth": "upstream account authorization failed; re-authorize it in 9router",
                  "router_unreachable": "cannot connect to 9router"}
@@ -30,6 +31,8 @@ class Runtime:
         self.gate = Gate(settings, Counters(), clock=clock, on_event=self._gate_event)
         self.pricing = Pricing(app, settings, clock=clock)
         self.pricing.on_unpriced = self._unpriced
+        self.gate.budgets.on_snapshot = self.ledger.add_budget
+        self.quota = QuotaCollector(self)
         self.exposure = Exposure(app, settings, clock=clock, on_change=self._exposure_change)
         self.clients = {}
         self.client_lock = threading.Lock()
@@ -68,6 +71,9 @@ class Runtime:
             self.notifier.alert("hold_timeout", pool, f"pool {pool}: request rejected: {(detail or {}).get('message')}")
         elif event == "gate_error":
             self.notifier.alert("gate_error", pool, f"gate error in pool {pool}: {(detail or {}).get('error')}")
+        elif event in ("quota_minimum", "quota_reject", "quota_recovered"):
+            self.notifier.alert(event, pool, f"pool {pool}: {(detail or {}).get('message')} "
+                                           f"({(detail or {}).get('mode')})")
 
     def _unpriced(self, model, kind):
         self.notifier.alert("unpriced_model", model, f"no price for model {model}; using the {kind} default price")
@@ -131,9 +137,11 @@ class Runtime:
         new, errors, warnings = settings_mod.load(path or self.settings.path)
         if errors:
             return False, errors, warnings
-        self.settings = new
-        self.gate.reload(new)
-        self.pricing.configure(new)
+        with self.quota.lock:
+            self.settings = new
+            self.gate.reload(new)
+            self.pricing.configure(new)
+            self.quota.configure()
         self.exposure.configure(new)
         self.notifier.webhook = new.webhook
         with self.client_lock:
@@ -154,6 +162,10 @@ class Runtime:
         except Exception as e:
             log.warning("restoring the rolling windows failed: %s", e)
         self.exposure.load()
+        try:
+            self.quota.load()
+        except Exception as e:
+            log.warning("loading upstream quotas failed: %s", e)
 
     def _loop(self, name, every, fn):
         def run():
@@ -191,6 +203,7 @@ class Runtime:
         self._loop("pricing", 30, self._price_tick)
         self._loop("counters", 60, lambda: save_counters(self.app, self.gate.counters, clock=self.clock))
         self._loop("gate", 15, self._gate_tick)
+        self._loop("quota", 15, self.quota.tick)
         self._loop("notify", 0, self.notifier.run_once)
 
     def shutdown(self):

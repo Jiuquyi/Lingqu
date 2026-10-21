@@ -34,7 +34,7 @@ class Pricing:
         if p["source"] == "ninerouter":
             nr = p["ninerouter"]
             base = nr.get("base_url") or settings.upstreams[nr["upstream"]].base_url
-            if not self.session or self.session.base_url != base.rstrip("/"):
+            if not self.session or self.session.base_url != base.rstrip("/") or self.session.password != (nr.get("password") or ""):
                 self.session = ninerouter.Session(base, nr.get("password") or "", clock=self.clock)
 
     def load_snapshot(self):

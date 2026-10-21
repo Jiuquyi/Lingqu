@@ -28,6 +28,7 @@ class Ledger(db.Model):
     eusd = db.Column(db.Float, default=0.0)
     eusd_input = db.Column(db.Float, default=0.0)                  # part counted at message_start
     counted_at = db.Column(db.Float)                               # when eusd_input entered the window
+    accounted_at = db.Column(db.Float)                             # exact final charge time, M4 checkpoint recovery
     price_ref = db.Column(db.String(160))
     held_ms = db.Column(db.Integer, default=0)
     ttfb_ms = db.Column(db.Integer)
@@ -84,3 +85,38 @@ class ExposureEvent(db.Model):
     until = db.Column(db.Float)
     actor = db.Column(db.String(128))
     source = db.Column(db.String(16))                              # page | api | cli | timer
+
+
+class BudgetSnapshot(db.Model):
+    __tablename__ = "budget_snapshots"
+    id = db.Column(db.Integer, primary_key=True)
+    pool = db.Column(db.String(128), index=True, nullable=False)
+    scope_key = db.Column(db.String(160), nullable=False)
+    ts = db.Column(db.Float, index=True, nullable=False)
+    trigger = db.Column(db.String(32))
+    remaining_r = db.Column(db.Float)
+    weight_now = db.Column(db.Float)
+    weight_rem = db.Column(db.Float)
+    s_rem = db.Column(db.Float)
+    h_value = db.Column(db.Float)
+    detail = db.Column(db.JSON)
+
+
+class UpstreamQuota(db.Model):
+    __tablename__ = "upstream_quota"
+    id = db.Column(db.Integer, primary_key=True)
+    pool = db.Column(db.String(128), index=True, nullable=False)
+    connection = db.Column(db.String(160), nullable=False)
+    ts = db.Column(db.Float, index=True, nullable=False)
+    window = db.Column(db.String(32), nullable=False)
+    used_pct = db.Column(db.Float, nullable=False)
+    reset_at = db.Column(db.Float)
+    source = db.Column(db.String(16))
+
+
+class CycleSpendSnapshot(db.Model):
+    __tablename__ = "cycle_spend_snapshots"
+    pool = db.Column(db.String(128), primary_key=True)
+    model = db.Column(db.String(256), primary_key=True)
+    saved_at = db.Column(db.Float, nullable=False)
+    charges = db.Column(db.JSON, nullable=False)

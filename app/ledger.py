@@ -9,7 +9,8 @@ import threading
 import time
 
 from . import db
-from .models import CounterSnapshot, GateEvent, Ledger
+from .models import BudgetSnapshot, CounterSnapshot, CycleSpendSnapshot, GateEvent, Ledger, UpstreamQuota
+from .gate.window import HISTORY_SPAN
 
 MAX_PENDING = 10000
 BATCH = 100
@@ -21,6 +22,7 @@ class LedgerWriter:
         self.lock = threading.Lock()
         self.rows = collections.deque()
         self.events = collections.deque()
+        self.observations = collections.deque()
         self.dropped = 0
         self.oldest_pending = None
         self.wake = threading.Event()
@@ -30,7 +32,7 @@ class LedgerWriter:
             if len(self.rows) >= MAX_PENDING:
                 self.rows.popleft()
                 self.dropped += 1
-            if not self.rows:
+            if self.oldest_pending is None:
                 self.oldest_pending = self.clock()
             self.rows.append(row)
             if len(self.rows) >= BATCH:
@@ -41,22 +43,43 @@ class LedgerWriter:
             if len(self.events) >= MAX_PENDING:
                 self.events.popleft()
             self.events.append(row)
+            if self.oldest_pending is None:
+                self.oldest_pending = self.clock()
 
     def lag(self):
         with self.lock:
-            return round(self.clock() - self.oldest_pending, 1) if self.rows and self.oldest_pending else 0
+            return round(self.clock() - self.oldest_pending, 1) if self.oldest_pending is not None else 0
+
+    def add_observation(self, kind, row):
+        with self.lock:
+            if len(self.observations) >= MAX_PENDING:
+                self.observations.popleft()
+                self.dropped += 1
+            self.observations.append((kind, row))
+            if self.oldest_pending is None:
+                self.oldest_pending = self.clock()
+
+    def add_quota(self, row):
+        self.add_observation("quota", row)
+
+    def add_budget(self, row):
+        fields = ("pool", "scope_key", "ts", "trigger", "remaining_r", "weight_now", "weight_rem", "s_rem", "h_value")
+        self.add_observation("budget", dict({k: row[k] for k in fields}, detail={k: v for k, v in row.items() if k not in fields}))
 
     def flush(self):
         with self.lock:
             rows, self.rows = list(self.rows), collections.deque()
             events, self.events = list(self.events), collections.deque()
+            observations, self.observations = list(self.observations), collections.deque()
             self.oldest_pending = None
-        if not rows and not events:
+        if not rows and not events and not observations:
             return 0
         try:
             with self.app.app_context():
                 db.session.bulk_insert_mappings(Ledger, rows)
                 db.session.bulk_insert_mappings(GateEvent, events)
+                db.session.bulk_insert_mappings(UpstreamQuota, [row for kind, row in observations if kind == "quota"])
+                db.session.bulk_insert_mappings(BudgetSnapshot, [row for kind, row in observations if kind == "budget"])
                 db.session.commit()
         except Exception:
             with self.app.app_context():
@@ -64,6 +87,10 @@ class LedgerWriter:
             with self.lock:  # keep them for the next try, oldest first, within the bound
                 self.rows.extendleft(reversed(rows[-MAX_PENDING:]))
                 self.events.extendleft(reversed(events[-MAX_PENDING:]))
+                self.observations.extendleft(reversed(observations[-MAX_PENDING:]))
+                while len(self.observations) > MAX_PENDING:
+                    self.observations.popleft()
+                    self.dropped += 1
                 self.oldest_pending = self.oldest_pending or self.clock()
                 while len(self.rows) > MAX_PENDING:
                     self.rows.popleft()
@@ -78,14 +105,21 @@ class LedgerWriter:
 
 
 def save_counters(app, counters, clock=time.time):
-    now = clock()
     with counters.lock:
+        now = clock()
         snap = {k: w.dump() for k, w in counters.windows.items()}
+        for h in counters.history.values():
+            h.prune(now)
+        history = {k: dict(h.amounts) for k, h in counters.history.items()}
     with app.app_context():
         CounterSnapshot.query.delete()
+        CycleSpendSnapshot.query.delete()
         for (pool, scope), buckets in snap.items():
             db.session.add(CounterSnapshot(pool=pool, scope_key=scope, saved_at=now,
                                            buckets={str(k): v for k, v in buckets.items()}))
+        for (pool, model), charges in history.items():
+            db.session.add(CycleSpendSnapshot(pool=pool, model=model, saved_at=now,
+                                               charges={str(k): v for k, v in charges.items()}))
         db.session.commit()
 
 
@@ -116,10 +150,35 @@ def restore_counters(app, gate, clock=time.time):
             model = r.model_actual or r.model_req
             first = r.eusd_input or 0
             start = r.counted_at or r.ts
-            end = r.ts + ((r.held_ms or 0) + (r.duration_ms or 0)) / 1000
-            if start >= since and first:
-                gate.charge(r.pool, model, first, start)
-            if end >= since and (r.eusd or 0) - first > 0:
-                gate.charge(r.pool, model, (r.eusd or 0) - first, end)
+            end = r.accounted_at or (r.ts + ((r.held_ms or 0) + (r.duration_ms or 0)) / 1000)
+            if (start > since if saved_at is not None else start >= since) and first:
+                gate.charge(r.pool, model, first, start, history=False)
+            if (end > since if saved_at is not None else end >= since) and (r.eusd or 0) - first > 0:
+                gate.charge(r.pool, model, (r.eusd or 0) - first, end, history=False)
             restored += 1
+    restore_history(app, gate.counters, clock)
     return restored
+
+
+def restore_history(app, counters, clock=time.time):
+    now = clock()
+    with counters.lock:
+        counters.history.clear()
+    with app.app_context():
+        snaps = CycleSpendSnapshot.query.all()
+        saved = {(s.pool, s.model): s.saved_at for s in snaps}
+        for s in snaps:
+            for ts, amount in s.charges.items():
+                counters.add_history(s.pool, s.model, float(ts), amount, now)
+        # Include newly added models that have no snapshot, and requests crossing a checkpoint.
+        rows = Ledger.query.filter(Ledger.ts >= now - HISTORY_SPAN - 3600).yield_per(1000)
+        for r in rows:
+            model = r.model_actual or r.model_req or ""
+            cutoff = saved.get((r.pool, model), now - HISTORY_SPAN)
+            first = r.eusd_input or 0
+            start = r.counted_at or r.ts
+            end = r.accounted_at or (r.ts + ((r.held_ms or 0) + (r.duration_ms or 0)) / 1000)
+            if start > cutoff and first:
+                counters.add_history(r.pool, model, start, first, now)
+            if end > cutoff and (r.eusd or 0) > first:
+                counters.add_history(r.pool, model, end, r.eusd - first, now)

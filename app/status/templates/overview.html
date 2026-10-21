@@ -58,7 +58,8 @@
     <div class="head">
       <span class="name">{{ p.name }}</span>
       <span class="muted">{{ p.upstream }}</span>
-      {% if p.state == "queuing" %}<span class="badge bad">排队中</span>
+      {% if p.state == "rejected" %}<span class="badge bad">保护性拒绝</span>
+      {% elif p.state == "queuing" %}<span class="badge bad">排队中</span>
       {% elif p.state == "override" %}<span class="badge warn">已临时取消限额</span>
       {% elif p.limit %}<span class="badge ok">放行</span>
       {% else %}<span class="badge">只计量</span>{% endif %}
@@ -69,6 +70,16 @@
     <div class="meter"><div class="{{ 'bad' if pct >= 100 else 'warn' if pct >= 80 else '' }}" style="width: {{ [pct, 100] | min }}%"></div></div>
     {% endif %}
     <dl>
+      {% if p.brake != "normal" %}<dt>紧急刹车</dt><dd class="bad">{{ '拒绝（≥98%）' if p.brake == 'reject' else '最低预算（≥90%）' }}</dd>{% endif %}
+      {% if p.reject_reason %}<dt>拒绝原因</dt><dd class="bad">{{ p.reject_reason }}</dd>{% endif %}
+      {% for b in p.budget or [] %}
+      <dt>动态预算 {{ b.scope_key }}</dt><dd>${{ "%.2f" | format(b.h_value) }} / 小时 · {{ '影子' if b.mode == 'shadow' else '执行' }} · 剩余 ${{ "%.2f" | format(b.remaining_r) }}</dd>
+      {% endfor %}
+      {% for c in p.cycles or [] %}<dt>周期 {{ c.scope_key }}</dt><dd>${{ "%.2f" | format(c.used_cycle) }} / ${{ "%g" | format(c.limit) }} · {{ c.cycle_end | when }} 重置 · {{ '影子' if c.mode == 'shadow' else '执行' }}</dd>{% endfor %}
+      {% if p.quota %}
+      <dt>上游额度</dt><dd>{% for q in p.quota.windows %}{{ q.window }} {{ "%.1f" | format(q.used_pct) }}%{% if q.stale %}（过期）{% endif %} {% endfor %}{% if p.quota.stale %}<span class="warn">待刷新</span>{% endif %}</dd>
+      {% if p.quota.last_error %}<dt>采集错误</dt><dd class="warn">{{ p.quota.last_error }}</dd>{% endif %}
+      {% endif %}
       <dt>最近 60 分钟</dt><dd>${{ "%.2f" | format(p.spent_1h) }}{% if p.limit %} / ${{ "%g" | format(p.limit) }}（{{ "%.0f" | format(pct) }}%）{% endif %}</dd>
       {% if p.state == "queuing" %}
       <dt>放行间隔</dt><dd>{% if p.step and p.step.gap %}每 {{ "%g" | format(p.step.gap) }} 秒一个{% elif p.step %}停 {{ p.step.off }} 秒 / 放 {{ p.step.on }} 秒{% endif %}</dd>

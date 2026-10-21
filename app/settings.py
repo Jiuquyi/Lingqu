@@ -6,15 +6,16 @@ errors and warnings, so `flask check` can report everything at once and a reload
 old settings when the new ones are bad.
 """
 import fnmatch
+import math
 import os
 import re
 from dataclasses import dataclass, field
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
 KINDS = ("claude", "codex")
-RULE_KINDS = ("hourly_cap", "concurrency", "rpm")
-LATER_RULE_KINDS = ("hourly_budget", "cycle_cap")  # third version: accepted, not enforced
+RULE_KINDS = ("hourly_cap", "hourly_budget", "cycle_cap", "concurrency", "rpm")
 ON_EXCEED = ("hold", "reject", "shadow")
 RELEASES = ("fifo", "phase")
 
@@ -47,6 +48,16 @@ class Rule:
     max: int = 0                # concurrency: requests in flight; rpm: requests per minute
     scope_model: str | None = None
     session_aware: bool = False  # hourly_cap with fifo: warm requests first, cold ones wait longer
+    cycle_limit: float = 0.0
+    cycle_period: float = 604800
+    anchor: str | float = "upstream_reset"
+    weight_profile: str = "workday"
+    timezone: str = "Asia/Shanghai"
+    flex: float = 0.5
+    h_min: float = 2.0
+    h_max: float = 30.0
+    short_limit: float | None = None
+    quota_window: str = "weekly"
 
     @property
     def scope_key(self):
@@ -64,6 +75,7 @@ class Pool:
     keys: list = field(default_factory=list)
     match: list = field(default_factory=list)
     rules: list = field(default_factory=list)
+    connections: list = field(default_factory=list)
 
     def matches(self, model):
         return any(fnmatch.fnmatchcase(model or "", p) for p in self.match)
@@ -85,6 +97,7 @@ class Upstream:
     base_url: str
     api_key: str
     dashboard: Dashboard | None = None
+    quota: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -118,6 +131,7 @@ class Settings:
     notify_throttle: bool = True
     auth_streak: int = 2        # account_auth / router_unreachable responses in a row before an alert
     path: str = ""
+    weight_profiles: dict = field(default_factory=dict)
 
     def dashboard_ports(self):
         return sorted({u.dashboard.port for u in self.upstreams.values() if u.dashboard and u.dashboard.port})
@@ -146,7 +160,10 @@ class _Loader:
         if value is None:
             return default
         try:
-            return parse_duration(value)
+            result = parse_duration(value)
+            if not math.isfinite(result) or result <= 0:
+                raise ValueError("duration must be finite and greater than 0")
+            return result
         except ValueError as e:
             self.errors.append(f"{where}: {e}")
             return default
@@ -154,7 +171,7 @@ class _Loader:
     def number(self, where, value, default, positive=True):
         if value is None:
             return default
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             self.errors.append(f"{where}: expected a number, got {value!r}")
             return default
         if positive and value <= 0:
@@ -183,6 +200,7 @@ def load(path=None, text=None):
     s.fifo = _steps(ld, "fifo", raw.get("fifo"), DEFAULT_FIFO, ("at", "gap"))
     s.phase = _steps(ld, "phase", raw.get("phase"), DEFAULT_PHASE, ("at", "off", "on"))
     _upstreams(ld, s, raw.get("upstreams") or [])
+    _weights(ld, s, raw.get("weight_profiles") or {})
     _pools(ld, s, raw.get("pools") or [])
     _keys(ld, s, raw.get("keys") or [])
     notify = raw.get("notify") or {}
@@ -317,16 +335,25 @@ def _upstreams(ld, s, raw):
                 ld.errors.append(f"upstream {name}: dashboard needs a port or a host")
             if dash.default_ttl > dash.max_ttl:
                 ld.errors.append(f"upstream {name}: dashboard.default_ttl is longer than max_ttl")
+        quota_raw = u.get("quota") or {}
+        if not isinstance(quota_raw, dict):
+            ld.errors.append(f"upstream {name}: quota must be a mapping")
+            quota_raw = {}
+        quota = dict(quota_raw)
+        if quota:
+            quota["refresh"] = ld.duration(f"upstream {name}: quota.refresh", quota.get("refresh"), 180)
+            quota["stale_after"] = ld.duration(f"upstream {name}: quota.stale_after", quota.get("stale_after"), 360)
+            if quota["refresh"] <= 0 or quota["stale_after"] < quota["refresh"]:
+                ld.errors.append(f"upstream {name}: quota needs 0 < refresh <= stale_after")
+            if not isinstance(quota.get("password"), str) or not quota.get("password"):
+                ld.errors.append(f"upstream {name}: quota.password is required")
         s.upstreams[name] = Upstream(name=name, base_url=(u.get("base_url") or "").rstrip("/"),
-                                     api_key=u.get("api_key") or "", dashboard=dash)
+                                     api_key=u.get("api_key") or "", dashboard=dash, quota=quota)
 
 
 def _rule(ld, pool, i, raw):
     where = f"pool {pool}: rules[{i}]"
     kind = (raw or {}).get("kind")
-    if kind in LATER_RULE_KINDS:
-        ld.warnings.append(f"{where}: {kind} is not implemented in this version and is ignored")
-        return None
     if kind not in RULE_KINDS:
         ld.errors.append(f"{where}: unknown kind {kind!r}")
         return None
@@ -343,13 +370,16 @@ def _rule(ld, pool, i, raw):
     if mode not in ("enforce", "shadow"):
         ld.errors.append(f"{where}: mode {mode!r} is not enforce or shadow")
     scope = raw.get("scope") or {}
+    if not isinstance(scope, dict) or ("model" in scope and not isinstance(scope["model"], str)):
+        ld.errors.append(f"{where}: scope must be a mapping with a model pattern")
+        scope = {}
     if set(scope) - {"model"}:
         ld.errors.append(f"{where}: only a model scope is supported")
     aware = raw.get("session_aware", False)
     if not isinstance(aware, bool):
         ld.errors.append(f"{where}: session_aware must be true or false")
         aware = False
-    if aware and (kind != "hourly_cap" or release != "fifo"):
+    if aware and (kind not in ("hourly_cap", "hourly_budget") or release != "fifo"):
         ld.errors.append(f"{where}: session_aware applies only to an hourly_cap with release fifo")
         aware = False
     r = Rule(kind=kind, on_exceed=on_exceed, release=release,
@@ -359,6 +389,42 @@ def _rule(ld, pool, i, raw):
         r.limit = float(ld.number(f"{where}: limit", raw.get("limit"), 0) or 0)
         if not raw.get("limit"):
             ld.errors.append(f"{where}: hourly_cap needs a limit")
+    elif kind in ("hourly_budget", "cycle_cap"):
+        r.cycle_limit = ld.number(f"{where}: cycle_limit", raw.get("cycle_limit"), 0)
+        if not raw.get("cycle_limit"):
+            ld.errors.append(f"{where}: {kind} needs cycle_limit")
+        r.cycle_period = ld.duration(f"{where}: cycle_period", raw.get("cycle_period"), 604800)
+        if not math.isfinite(r.cycle_period) or not 3600 <= r.cycle_period <= 31 * 86400:
+            ld.errors.append(f"{where}: cycle_period must be between 1h and 31d")
+        r.anchor = raw.get("anchor", "upstream_reset")
+        if not valid_anchor(r.anchor):
+            ld.errors.append(f"{where}: anchor must be upstream_reset, a unix time, or 'mon 00:00'")
+        r.timezone = raw.get("timezone", "Asia/Shanghai")
+        try:
+            ZoneInfo(r.timezone)
+        except (ZoneInfoNotFoundError, TypeError, ValueError):
+            ld.errors.append(f"{where}: unknown timezone {r.timezone!r}")
+        r.quota_window = raw.get("quota_window", "weekly_opus" if "opus" in (r.scope_model or "") else "weekly")
+        if r.quota_window not in ("weekly", "weekly_opus", "weekly_sonnet"):
+            ld.errors.append(f"{where}: unsupported quota_window {r.quota_window!r}")
+        if kind == "cycle_cap":
+            r.on_exceed = "reject"
+            if on_exceed not in ("reject", "shadow") and "on_exceed" in raw:
+                ld.errors.append(f"{where}: cycle_cap must use on_exceed reject or shadow")
+        else:
+            r.weight_profile = raw.get("weight_profile", "workday")
+            if not isinstance(r.weight_profile, str):
+                ld.errors.append(f"{where}: weight_profile must be a name")
+                r.weight_profile = "workday"
+            r.flex = ld.number(f"{where}: flex", raw.get("flex"), 0.5, positive=False)
+            r.h_min = ld.number(f"{where}: h_min", raw.get("h_min"), 2)
+            r.h_max = ld.number(f"{where}: h_max", raw.get("h_max"), 30)
+            if r.flex < 0 or r.h_min <= 0 or r.h_max < r.h_min:
+                ld.errors.append(f"{where}: needs flex >= 0 and 0 < h_min <= h_max")
+            if "short_limit" in raw:
+                r.short_limit = ld.number(f"{where}: short_limit", raw["short_limit"], 0)
+                if not raw["short_limit"]:
+                    ld.errors.append(f"{where}: short_limit must be positive")
     else:
         r.max = int(ld.number(f"{where}: max", raw.get("max"), 0) or 0)
         if not raw.get("max"):
@@ -384,19 +450,30 @@ def _pools(ld, s, raw):
         if p.get("upstream") not in s.upstreams:
             ld.errors.append(f"pool {name}: upstream {p.get('upstream')!r} is not defined")
         rules = [r for r in (_rule(ld, name, j, x) for j, x in enumerate(p.get("rules") or [])) if r]
-        caps = [r for r in rules if r.kind == "hourly_cap" and not r.shadow]
+        caps = [r for r in rules if r.kind in ("hourly_cap", "hourly_budget") and not r.shadow]
         if len({r.release for r in caps}) > 1:
             ld.errors.append(f"pool {name}: all enforcing hourly_cap rules must use the same release")
         if len({r.session_aware for r in caps}) > 1:
             ld.errors.append(f"pool {name}: set session_aware on all of its enforcing hourly_cap rules or none")
         if len([r for r in rules if r.kind == "hourly_cap" and r.scope_model is None]) > 1:
             ld.errors.append(f"pool {name}: more than one pool-wide hourly_cap")
+        for r in rules:
+            if r.kind == "hourly_budget" and r.weight_profile not in s.weight_profiles:
+                ld.errors.append(f"pool {name}: unknown weight_profile {r.weight_profile!r}")
+        for kind_rule in ("hourly_budget", "cycle_cap"):
+            scopes = [r.scope_key for r in rules if r.kind == kind_rule]
+            if len(scopes) != len(set(scopes)):
+                ld.errors.append(f"pool {name}: duplicate {kind_rule} scope")
+        connections = p.get("connections") or []
+        if not isinstance(connections, list) or any(not isinstance(c, str) or not c for c in connections):
+            ld.errors.append(f"pool {name}: connections must be a list of connection IDs")
+            connections = []
         match = (p.get("match") or {}).get("models") or []
         keys = [k for k in (p.get("keys") or [])]
         if any(not k for k in keys):
             ld.errors.append(f"pool {name}: a key is empty")
         s.pools[name] = Pool(name=name, kind=kind, upstream=p.get("upstream"),
-                             keys=[k for k in keys if k], match=list(match), rules=rules)
+                             keys=[k for k in keys if k], match=list(match), rules=rules, connections=connections)
         for k in keys:
             if not k:
                 continue
@@ -427,6 +504,47 @@ def _keys(ld, s, raw):
             if not s.pools[p].match:
                 ld.errors.append(f"keys[{i}]: pool {p} has no match.models, so no model can reach it")
         s.keys[key] = KeyBinding(upstream=ups.pop(), pools=list(pools))
+
+
+def valid_anchor(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return math.isfinite(value)
+    return isinstance(value, str) and (value == "upstream_reset" or
+        re.fullmatch(r"(mon|tue|wed|thu|fri|sat|sun) ([01]\d|2[0-3]):[0-5]\d", value) is not None)
+
+
+def _weights(ld, s, raw):
+    s.weight_profiles = {"flat": [1.0] * 168, "workday": [
+        (0.5 if day >= 5 else 1.0 if 9 <= hour < 19 else 0.2)
+        for day in range(7) for hour in range(24)]}
+    if not isinstance(raw, dict):
+        ld.errors.append("weight_profiles: must be a mapping")
+        return
+    for name, profile in raw.items():
+        try:
+            if isinstance(profile, list):
+                values = profile
+            else:
+                values = []
+                for day in range(7):
+                    hours = profile.get("weekend" if day >= 5 else "weekday", {})
+                    weights = [hours.get("default", 0.2)] * 24
+                    assigned = set()
+                    for span, weight in hours.items():
+                        if span == "default":
+                            continue
+                        start, end = map(int, str(span).split("-"))
+                        if not 0 <= start < end <= 24 or assigned.intersection(range(start, end)):
+                            raise ValueError("hour ranges must be non-overlapping within 00-24")
+                        assigned.update(range(start, end))
+                        weights[start:end] = [weight] * (end - start)
+                    values.extend(weights)
+            if len(values) != 168 or any(isinstance(v, bool) or not isinstance(v, (int, float)) or
+                                        not math.isfinite(v) or v <= 0 for v in values):
+                raise ValueError("needs 168 finite positive hourly weights")
+            s.weight_profiles[name] = list(values)
+        except (AttributeError, TypeError, ValueError) as e:
+            ld.errors.append(f"weight_profiles.{name}: {e}")
 
 
 def _cross_checks(ld, s):
