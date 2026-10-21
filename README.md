@@ -2,15 +2,16 @@
 
 架在 New API 和 9router 之间的流控代理：把每次请求的 token 按价格表折算成等价美元（eUSD），按"池"（一个订阅账户的一类上游）分别核算；超过每小时限额时，请求在灵渠里排队、按间隔匀速放出，而不是报错。设计见 [docs/DESIGN.md](docs/DESIGN.md)。
 
-当前实现的是里程碑 M1 ～ M3（DESIGN §14）：
+当前实现的是里程碑 M1 ～ M4（DESIGN §14）：
 
 | 已实现 | 推后 |
 |---|---|
-| 按 key / 按模型名分池；`/v1/*` 透传，请求体一个字节不改，只换 key | 动态小时预算、周期上限、上游额度采集（M4） |
+| 按 key / 按模型名分池；`/v1/*` 透传，请求体一个字节不改，只换 key | |
 | SSE 逐块透传；三种协议的 usage 解析，Anthropic 在 `message_start` 就计入 | `downgrade` |
 | 价格从 New API / 9router / 静态配置同步，失败时沿用上次 | 控制台、9router 管理器、多实例（M5） |
 | `hourly_cap` + `fifo`（默认）/ `phase`（对照）；队首超时、`max_hold`、`max_queue`；并发、RPM；`shadow` | |
 | M3：会话感知的 `fifo`（`session_aware: true`，热请求赶在缓存过期前放行，冷请求排后面；默认关闭，按池回放后打开，DESIGN §4.5.1）；并发上限先 shadow、空出的名额按等待先后分配 | |
+| M4：9router 额度采集、响应头补充；`hourly_budget`、168 小时权重、`cycle_cap`；90% 最低预算 / 98% 拒绝；预算与额度快照、长周期恢复（[配置及边界](docs/M4.md)） | |
 | 账本（含每个请求的 `cache_state`）、限速事件、重启恢复（窗口和会话时钟）、热重载、管理员覆盖、webhook 告警 | |
 | 错误分类（含流里的错误、连不上 9router）；`account_auth` / `router_unreachable` 连续出现时告警，恢复时再推一条 | |
 | `/status`、`/stats`、`/events`、`/healthz`；状态端口 `/` 的只读状态页（池、计量、限速事件） | |

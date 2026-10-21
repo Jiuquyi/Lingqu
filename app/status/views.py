@@ -30,6 +30,7 @@ def require_admin():
 
 PERIODS = [("today", "今天"), ("24h", "24 小时"), ("7d", "7 天"), ("30d", "30 天")]
 EVENT_NAMES = {"throttle_start": "开始排队", "throttle_end": "解除", "step_change": "换档", "rejected": "拒绝（503）",
+               "quota_minimum": "额度 ≥90% 最低预算", "quota_reject": "额度 ≥98% 拒绝", "quota_recovered": "额度刹车解除",
                "override": "管理员覆盖", "gate_error": "闸门错误",
                "account_auth": "账户授权失效", "account_auth_recovered": "账户授权恢复",
                "router_unreachable": "连不上 9router", "router_unreachable_recovered": "9router 恢复"}
@@ -90,12 +91,12 @@ def healthz():
 @status.route("/status")
 def status_json():
     r = rt()
-    now = time.time()
+    now = r.clock()
     pools = []
     for name, p in r.settings.pools.items():
         st = r.gate.pool_status(name, now)
         pools.append({"name": name, "kind": p.kind, "upstream": p.upstream, **st,
-                      "budget": None, "quota": None, "last_error": r.last_errors.get(name)})
+                      "quota": r.quota.status(name, now), "last_error": r.last_errors.get(name)})
     return jsonify({
         "now": int(now), "version": VERSION,
         "pricing": {"source": r.pricing.table.source, "synced_at": r.pricing.table.synced_at,
@@ -175,6 +176,13 @@ def pricing_sync():
         return jsonify({"ok": False, "error": str(e)}), 502
     return jsonify({"ok": True, "source": table.source, "models": len(table.prices) +
                     sum(len(m) for m in table.by_provider.values())})
+
+
+@status.route("/admin/quota/sync", methods=["POST"])
+def quota_sync():
+    require_admin()
+    errors = rt().quota.sync()
+    return jsonify({"ok": not errors, "errors": errors}), (502 if errors else 200)
 
 
 # ------------------------------------------------------------ dashboard gate (DESIGN §2.4)

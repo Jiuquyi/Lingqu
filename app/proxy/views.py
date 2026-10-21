@@ -120,6 +120,7 @@ def relay(sub):
             rt.upstream_result(pool, error_class, f"{upstream.name}: {e}")
         return plain_error(502, protocol, f"lingqu: upstream {upstream.name} unreachable: {e}")
 
+    rt.quota.headers(pool, resp.headers)
     out_headers = response_headers(resp)
     if ticket:
         out_headers += [("X-Lingqu-Pool", pool), ("X-Lingqu-Held-Ms", str(int(ticket.held * 1000))),
@@ -188,8 +189,7 @@ def metered_body(rt, resp, pool, kind, model, protocol, row, sent_at, ticket, st
                 if tracker.model and tracker.model != model:
                     price, price_ref = rt.pricing.price(tracker.model, kind)
                 counted = cost(price, tracker.usage, input_only=True)
-                counted_at = time.time()
-                rt.gate.charge(pool, tracker.model or model, counted)
+                counted_at = rt.gate.charge(pool, tracker.model or model, counted)
     finally:
         resp.close()
         end = time.time()
@@ -209,8 +209,9 @@ def metered_body(rt, resp, pool, kind, model, protocol, row, sent_at, ticket, st
             else:
                 source = "none" if not tracker.input_ready else "upstream"
             total = cost(price, usage) if status < 400 or tracker.input_ready else 0.0
+            accounted_at = end
             if total > counted:
-                rt.gate.charge(pool, tracker.model or model, total - counted)
+                accounted_at = rt.gate.charge(pool, tracker.model or model, total - counted)
             detail = bytes(error_text).decode("utf-8", "replace")
             error_class = proto.classify_error(status, detail)
             if error_class is None and tracker.error:
@@ -223,6 +224,7 @@ def metered_body(rt, resp, pool, kind, model, protocol, row, sent_at, ticket, st
                        input_tokens=u.input, cache_read_tokens=u.cache_read, cache_write_5m_tokens=u.cache_write_5m,
                        cache_write_1h_tokens=u.cache_write_1h, output_tokens=u.output, reasoning_tokens=u.reasoning,
                        usage_source=source, eusd=max(total, counted), eusd_input=counted, counted_at=counted_at,
+                       accounted_at=accounted_at,
                        price_ref=price_ref, ttfb_ms=int((first_byte - sent_at) * 1000) if first_byte else None,
                        duration_ms=int((end - sent_at) * 1000))
             rt.ledger.add(row)

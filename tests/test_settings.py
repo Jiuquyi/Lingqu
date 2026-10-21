@@ -51,11 +51,11 @@ class SettingsTestCase(unittest.TestCase):
         _, errors, _ = settings_mod.load(text=BASE.replace("kind: hourly_cap", "kind: weird"))
         self.assertTrue(any("weird" in e for e in errors))
 
-    def test_later_rule_kinds_warn(self):
+    def test_dynamic_budget_needs_cycle_limit(self):
         _, errors, warnings = settings_mod.load(text=BASE.replace(
             "keys: [lq-a-codex], rules: []", "keys: [lq-a-codex], rules: [{ kind: hourly_budget }]"))
-        self.assertEqual(errors, [])
-        self.assertTrue(any("hourly_budget" in w for w in warnings))
+        self.assertTrue(any("cycle_limit" in e for e in errors))
+        self.assertFalse(any("ignored" in w for w in warnings))
 
     def test_model_keys(self):
         text = BASE.replace("keys: [lq-a-codex], rules: []",

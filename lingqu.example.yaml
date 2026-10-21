@@ -46,6 +46,8 @@ upstreams:                            # one per 9router instance
   - name: router-team-a
     base_url: http://router-team-a:20128
     api_key: "${ROUTER_TEAM_A_KEY}"
+    # M4: enable quota polling independently of dashboard exposure (see docs/M4.md).
+    # quota: { password: "${ROUTER_TEAM_A_PASSWORD}", refresh: 3m, stale_after: 6m }
     dashboard:                        # DESIGN §2.4
       port: 8101                      # or host: team-a.dash.example
       default_ttl: 30m
@@ -59,9 +61,17 @@ pools:
     kind: claude
     upstream: router-team-a
     keys: ["${LQ_TEAM_A_CLAUDE}"]
+    # connections: ["<9router OAuth connection id>"]  # required if this provider has multiple accounts
     rules:
       # add session_aware: true once `flask replay --policy docs/replay/m3.yaml` shows it helps (DESIGN §4.5.1)
       - { kind: hourly_cap, limit: 20, on_exceed: hold, release: fifo }
+      # Observe H(t) alongside the fixed cap for two weeks, then change mode to enforce.
+      # short_limit must be measured for the subscription; omit it to disable the 5h eUSD constraint.
+      # - { kind: hourly_budget, cycle_limit: 800, cycle_period: 7d, anchor: upstream_reset,
+      #     weight_profile: workday, timezone: Asia/Shanghai, flex: 0.5,
+      #     h_min: 2, h_max: 30, short_limit: 100, mode: shadow }
+      # - { kind: cycle_cap, cycle_limit: 800, cycle_period: 7d, anchor: upstream_reset,
+      #     on_exceed: reject, mode: shadow }
       - { kind: concurrency, max: 3, on_exceed: hold, mode: shadow }   # watch /status concurrency first
   - name: team-a/codex
     kind: codex

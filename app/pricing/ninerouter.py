@@ -38,7 +38,8 @@ class Session:
     def login(self):
         if self.failed_at is not None and self.clock() - self.failed_at < LOGIN_RETRY_SEC:
             raise RuntimeError("9router login failed recently; waiting before trying again")
-        r = httpx.post(self.base_url + "/api/auth/login", json={"password": self.password}, timeout=15)
+        self.failed_at = self.clock()  # network failures also observe the login cooldown
+        r = httpx.post(self.base_url + "/api/auth/login", json={"password": self.password}, timeout=15, trust_env=False)
         token = r.cookies.get("auth_token")
         if r.status_code != 200 or not token:
             self.failed_at = self.clock()
@@ -49,11 +50,11 @@ class Session:
         with self.lock:
             if not self.cookie:
                 self.login()
-            r = httpx.get(self.base_url + path, cookies={"auth_token": self.cookie}, timeout=15)
+            r = httpx.get(self.base_url + path, cookies={"auth_token": self.cookie}, timeout=15, trust_env=False)
             if r.status_code == 401:
                 self.cookie = None
                 self.login()
-                r = httpx.get(self.base_url + path, cookies={"auth_token": self.cookie}, timeout=15)
+                r = httpx.get(self.base_url + path, cookies={"auth_token": self.cookie}, timeout=15, trust_env=False)
             r.raise_for_status()
             return r.json()
 
