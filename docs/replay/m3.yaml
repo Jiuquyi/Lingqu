@@ -1,0 +1,33 @@
+# M3 replay set (DESIGN §4.5, §7, §14): plain fifo against session-aware fifo and a concurrency cap.
+#
+#   flask replay --source ledger --pool team-a/claude --from 2026-10-14 --to 2026-10-21 --policy docs/replay/m3.yaml
+#   python scripts/replay_synth.py --users 4 --limit 30 --seeds 5 --policy docs/replay/m3.yaml
+#
+# Policies without a limit take --limit (or the pool's configured one); the replay adds "no limit"
+# and the pool's current rule (flask replay) or plain fifo (replay_synth.py) on top.
+policies:
+  # What `session_aware: true` does with the default defaults (hold_cap_cold 300 s, max_hold 150 s):
+  # warm requests leave before their cache expires, cold ones wait up to 150 s.
+  - name: sessions
+    release: fifo
+    session_aware: true
+  # The same with max_hold raised so cold requests can wait the full hold_cap_cold.
+  - name: sessions, cold 300s
+    release: fifo
+    session_aware: true
+    hold_cap_cold: 300s
+    max_hold: 330s
+  # Each half alone, to see which one does the work on this pool.
+  - name: sessions, warm deadline only
+    release: fifo
+    session_aware: true
+    cold_cap: false
+  - name: sessions, cold 300s only
+    release: fifo
+    session_aware: true
+    warm_deadline: false
+    hold_cap_cold: 300s
+    max_hold: 330s
+  - name: fifo + concurrency 3
+    release: fifo
+    concurrency: 3

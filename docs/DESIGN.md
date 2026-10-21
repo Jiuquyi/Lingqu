@@ -1,10 +1,11 @@
 # 灵渠（Lingqu）设计文档
 
-> 版本：v0.5 草案 · 2026-10-21
+> 版本：v0.6 · 2026-10-21
 > - v0.2：上游从仅 Codex 扩展为 Codex / Claude
 > - v0.3：流控改为以 1 小时为控制周期（动态小时预算）；架构图改为 SVG
 > - v0.4：上游池可对应多个 9router 实例；超限默认挂起而不是 429；实现改为 Python（基于 flasky 骨架）；控制台和 9router 管理器推后
 > - v0.5：吸收已运行的旁路限速方案的经验（分级降速档位、缓存寿命约束、回放方法、安全边界、观测与告警、配置校验）；价格表改为从 New API 或 9router 同步；Flask 实现细化（流式透传、运行模型、部署方式）；9router Dashboard 入口按需开放；默认放行方式从分级停放改为 FIFO 匀速出队（回放数据见 §4.5）
+> - v0.6（M3）：会话感知的 FIFO（按每个请求自己的缓存期限出队，§4.5，回放结果见 §4.5.1）；并发上限先 shadow、空出的名额按等待先后分配（§4.3 ④）；错误分类补全（流内错误、连不上 9router）和按连续次数告警（§4.7、§6.4）
 >
 > 本文只讲灵渠本身。具体部署怎么接入、怎么从原有限速方案迁移，由各部署方自己的文档说明。
 >
@@ -339,7 +340,9 @@ ratio  = used_1h / H(t)
 
 - 每个池的并发上限，例如 Claude 3、Codex 4。实际观察：一个 Claude Code 会话基本串行，同时最多 2 个请求，所以 3 已经很宽松；并发太高的流量特征更容易触发上游风控。
 - RPM 兜底，主要防止大量小请求（agent 死循环）。
-- 新上线的并发规则先用 `shadow` 模式观察。
+- 新上线的并发规则先用 `shadow` 模式观察（`mode: shadow`）：本该排队的请求照常放行，账本记 `gate_result=shadow_would_hold`。观察看三处：`/status` 每个池的 `concurrency`（当前、1 小时峰值、本该排队的次数）、`/stats` 的 `concurrency_peak` 和 `shadow_would_hold`，以及 `flask replay` 的 `concurrency: N` 策略（§7）。一周里峰值从没碰到上限、回放里等待也没变，再改成执行。
+- 判断顺序是**先金额、后名额**：金额闸门放行（或队首超时）的请求，还要等到有空名额才转发；等名额最多等 `max_hold`，超过返回 503（名额是硬上限，不受队首超时影响）。
+- **空出的名额按等待先后分配**：一个名额空出来时，排在前面、只差名额的请求先拿；新来的请求不能插到它们前面。
 
 ### 4.4 计入时机与会话
 
@@ -351,11 +354,16 @@ ratio  = used_1h / H(t)
 - **非流式**：响应体里的 `usage`。
 - **没拿到 usage**（上游报错、客户端中途断开、chat 流没带 usage）：已经计入的保留；输出部分按已转发的字节粗估（约 4 字节 / token），账本标记 `usage_source=estimated`。
 
-**会话识别**（第二版用）：
+**会话识别**（M3）：
 
-- Claude Code 的请求体里有 `metadata.user_id`，其中带着会话 id。灵渠只读、不改请求体。
-- 灵渠记下每个会话上一个请求的**开始时间**。如果距今超过 5 分钟，或者这是会话的第一个请求，这个请求必然要写缓存，可以预期它是大请求。
-- §4.5 用这个判断来区分"多等一会儿也不会多花钱"的请求。
+- Claude Code 的请求体里有 `metadata.user_id`，其中带着会话 id；Codex 的 `/v1/responses` 带 `prompt_cache_key`（每个对话一个）。灵渠两者都只读、不改请求体，前者优先；都没有时这个请求"没有会话"。
+- 灵渠按（池，会话）记下上一个请求**转发出去的时间**（会话时钟，`gate/sessions.py`）。到达时据此把请求分成三类，写进账本的 `cache_state`：
+  - `cold`：会话的第一个请求，或者距上一个请求超过 `cache_ttl`（默认 5 分钟）。缓存已经没了，这个请求无论等多久都要重建；
+  - `warm`：距上一个请求不到 `cache_ttl`。它会命中缓存，前提是在 `上一个请求的开始时间 + cache_ttl` 之前转发出去；
+  - `none`：没有会话 id，按普通 FIFO 处理。
+- 重启时从账本恢复会话时钟（和窗口一起），重启前还是热的会话不会被当成冷的。
+- 局限：一个会话里换模型（缓存按模型分开）、子 agent（前缀不同）都会被当成热的。这是"安全"的错判：热请求只会等得更短。`flask replay` 会用实际的读写缓存 token 核对这个判断（§7）。
+- §4.5 用这个判断区分"多等一会儿也不会多花钱"的请求。
 
 **完整的预估方案**（保留，需要"按单个请求的费用决定放不放行"时再做）：预估 = 输入 token（Codex 用 `tiktoken` 的 `o200k_base`；Claude 用同样的计数乘校正系数 1.15，系数和缓存命中率按历史滚动修正）+ `min(max_tokens, 该模型近 24h 输出的 P75)`；所有命中的窗口先预留，拿到 usage 后结算差额；预留带 TTL（30 分钟）防泄漏。
 
@@ -378,7 +386,7 @@ ratio  = used_1h / H(t)
 |------|------|------|
 | `fifo`（排队匀速出队） | **默认**。每个池一个 FIFO 队列。没超限时队列不起作用，请求直接走；超限后，请求按到达顺序出队，相邻两次出队至少间隔 `gap(ratio)`，超得越多间隔越长 | 首版 |
 | `phase`（分级停放） | 超限后按档位交替"停 N 秒、放 M 秒"，"停"的阶段新到的请求挂起到这一阶段结束。和旁路开关渠道的效果一致，只用于迁移时做对照 | 首版（对照用） |
-| `fifo` + 会话感知 | 在 `fifo` 的基础上，会命中缓存的请求排在前面，必然要写缓存的请求排在后面、可以等更久（§4.4） | 第二版，先回放验证 |
+| `fifo` + 会话感知 | 在 `fifo` 的基础上，会命中缓存的请求排在前面，必然要写缓存的请求排在后面、可以等更久（§4.4、§4.5.1）。规则上加 `session_aware: true` 打开 | M3，默认关闭，按池用回放决定 |
 
 **为什么默认用 FIFO**：
 
@@ -409,7 +417,7 @@ ratio  = used_1h / H(t)
 
 - **按花费出队**（每放一个请求，按它的费用折算下一次出队的时间，比如 $3 的请求要等 9 分钟）：峰值和固定间隔一样，但大请求之后的等待太长，缓存过期多花 $8。
 - **按预估费用的令牌桶**（冷请求按整段上下文重写估价，桶里的钱够了才放）：冷请求估价很高，要攒很久才放得出去，等待超过 5 分钟，下一个请求又变冷，形成连锁；缓存过期多花 $7～23，比固定间隔差。
-- **热请求优先**（会命中缓存的排前面）：在这份数据上几乎没有差别，因为一个池里同时排队的通常只有一两个人。留到第二版，用更多数据再验证。
+- **热请求优先**（会命中缓存的排前面）：在这份数据上几乎没有差别，因为一个池里同时排队的通常只有一两个人。M3 用更多人的数据重新验证，见 §4.5.1：单纯"热的排前面、冷的多等"仍然不够，起作用的是"每个热请求在自己的缓存过期前放行"。
 
 **默认出队间隔**（`fifo`，按 `ratio` 分档）：
 
@@ -442,8 +450,9 @@ ratio  = used_1h / H(t)
 | 请求 | 单次最长挂起 | 依据 |
 |------|------------|------|
 | 会命中缓存的 | **120 秒**（`hold_cap_cached`） | 再长，加上用户自己的间隔，就容易越过 5 分钟缓存寿命，反而多花一次重建 |
-| 必然要写缓存的 | **300 秒**左右（`hold_cap_cold`，需实测） | 反正要重建，多等不多花钱；上限受下游超时约束：New API 等上游响应头的 `RELAY_RESPONSE_HEADER_TIMEOUT`（默认 1800 秒）、Claude Code 的 `API_TIMEOUT_MS`（默认 600 秒） |
-| 任何请求 | `max_hold`（默认 150 秒，第二版提高） | 超过就 503 |
+| 会命中缓存的，会话感知时 | `hold_cap_cached` 和"离缓存过期还剩多久 − 15 秒"取小 | 一个距上一个请求已经 4 分半的请求，最多再等 15 秒 |
+| 必然要写缓存的（只在会话感知时区分） | `hold_cap_cold`（默认 300 秒）和 `max_hold` 取小 | 反正要重建，多等不多花钱；到了就放行，**不返回 503**（503 之后它重试时还是冷的）。上限受下游超时约束：New API 等上游响应头的 `RELAY_RESPONSE_HEADER_TIMEOUT`（默认 1800 秒）、Claude Code 的 `API_TIMEOUT_MS`（默认 600 秒） |
+| 任何请求 | `max_hold`（默认 150 秒） | 超过就 503（冷请求除外，见上一行） |
 
 - 挂起期间**不发响应头**。一旦发了 200，就没法再返回错误了。
 - New API 的 `STREAMING_TIMEOUT` 管的是流开始后两个 chunk 之间的空闲，和挂起无关。
@@ -462,6 +471,47 @@ ratio  = used_1h / H(t)
   "error": { "type": "overloaded_error",
              "message": "lingqu: pool team-a/claude spent $23.10 of $20 in the last hour; waited 150 s" } }
 ```
+
+### 4.5.1 会话感知的 FIFO（M3）
+
+**做法**：池的 `hourly_cap` 规则加上 `session_aware: true` 后，每个排队的请求有自己的放行期限（"队首超时"按请求算）：
+
+| 请求（§4.4） | 放行期限（到达时间 + …） |
+|---|---|
+| `warm` | `min(hold_cap_cached, cache_ttl − 15 秒 − 距上一个请求的秒数)`：赶在它的缓存过期前 |
+| `cold` | `min(hold_cap_cold, max_hold)` |
+| `none` | `hold_cap_cached`（和普通 FIFO 一样） |
+
+- 队列按**期限最早的先走**排序（EDF）：期限到了直接放行；没到期限的，队首按 `gap(ratio)` 一个一个放。所有期限都一样长时，这个顺序就是普通 FIFO，所以它是 FIFO 的推广，不是另一套机制。
+- 效果：快过期的热请求先走（或者到期直接走），不会被拖过 5 分钟；冷请求排在后面，等得更久也不多花钱；出队间隔、档位、`max_queue` 都不变。
+- `/status` 里每个池多了 `held_cold`（排队中的冷请求）、`sessions.aware`、`sessions.warm`（缓存还热的会话数）。
+
+**回放**（`flask replay --policy docs/replay/m3.yaml`；手头没有更多真实日志，用 `scripts/replay_synth.py` 生成的合成负载，按 §1.3、§4.5 的真实数字校准：两个人一周约 1700 个请求，命中缓存的请求中位约 $0.17，重建一次 $3～4，约一成请求是冷的。每格是 5 份不同随机种子的一周负载的平均）：
+
+| 一个池里 / 限额 | 方式 | 60 分钟最高费用 | 因缓存过期多花 | 热请求排队中位 | 冷请求排队中位 | 最长等待 | 报错 |
+|---|---|---|---|---|---|---|---|
+| 2 人 / $20 | `fifo` | $43.6 | $1.9 | 13 秒 | 18 秒 | 71 秒 | 0 |
+| | 会话感知 | $43.3 | $0 | 12 秒 | 29 秒 | 72 秒 | 0 |
+| 3 人 / $20 | `fifo` | $50.2 | $8.7 | 21 秒 | 25 秒 | 121 秒 | 0 |
+| | 会话感知 | **$48.5** | **$0** | 19 秒 | 45 秒 | 141 秒 | 0 |
+| 4 人 / $30 | `fifo` | $64.7 | $17.8 | 25 秒 | 27 秒 | 119 秒 | 0 |
+| | 会话感知 | **$61.7** | **$0** | 22 秒 | 48 秒 | 144 秒 | 0 |
+| 4 人 / $20 | `fifo` | $60.4 | $53.9 | 44 秒 | 45 秒 | 121 秒 | 0 |
+| | 会话感知 | **$55.4** | **$0** | 38 秒 | 71 秒 | 151 秒 | 0 |
+| 6 人 / $40 | `fifo` | $83.7 | $83.1 | 49 秒 | 48 秒 | 1327 秒 | 8 |
+| | 会话感知 | **$77.5** | $2.0 | 42 秒 | 71 秒 | 721 秒 | 5 |
+
+- **两个人的池没有差别**（峰值 −0.6%），和 §4.5 用真实日志得出的结论一致：同时排队的人太少。
+- **三个人以上、经常超限的池明显改善**：60 分钟峰值低 3.5%～8%，因缓存过期多花的钱几乎归零（这部分钱本身也算在峰值里），热请求等得更短；代价是冷请求的中位等待多 20～30 秒、最长等待到 `max_hold`。报错没有增加。
+- **起作用的主要是"热请求赶在缓存过期前放行"**。分开回放：只做这一半，缓存过期的钱同样归零，峰值的改善大部分还在（4 人 / $20：$55.6，两半都做 $55.4）；只让冷请求多等（300 秒），缓存过期的钱只少一点、有时更多（4 人 / $30：$17.8 → $20.4），还会因为冷请求占着队列在超载时多出 503（6 人时报错 8 → 19）。两半一起最好：冷请求让出位置，热请求等得更短。
+- **冷请求等 300 秒还是 150 秒**（`max_hold` 提到 330 秒）：峰值相差在 ±2% 以内（有高有低），热请求中位再短 1～8 秒，但冷请求最长要等 5 分钟，超载时（6 人）报错从 5 升到 10。默认用 150 秒（不改 `max_hold`）。
+- 提前放行（期限到了不等间隔）会不会放过太多：按期限放行的次数比普通 FIFO 的队首超时**还少**（4 人 / $20：239 → 187 次），因为热请求不再被拖到 120 秒。
+
+**结论与上线方式**：
+
+1. 默认关闭。验收标准（§14）是"60 分钟最高费用或等待时间比 M2 的 `fifo` 有明显改善，否则不上"：两人的池不满足，三人以上经常超限的池在合成数据上满足。
+2. 每个池在打开之前，用它自己的账本回放：`flask replay --source ledger --pool <池> --from … --to … --policy docs/replay/m3.yaml`。账本有会话 id 和读写缓存的 token 数，回放会先打印"冷 / 热判断"和实际缓存读写的对照（`warm/rebuilt` 应接近 0），再打印各策略的对比。M1 起的账本就有会话 id，可以直接用。
+3. 回放里会话感知的峰值或热请求等待明显好于 `fifo`，再在该池的规则上加 `session_aware: true`，热重载即可（不用重启）；之后用 `/stats` 的冷请求占比、`/status` 的等待和回放对照。
 
 ### 4.6 自适应：读取上游真实余量（第三版）
 
@@ -494,15 +544,20 @@ ratio  = used_1h / H(t)
 | 灵渠退出 | 先停止接新请求；**挂起中的请求立即返回 503**（客户端会重试）；正在进行的流等它跑完，最多 600 秒 |
 | 管理员要提前解除或临时收紧 | `POST /admin/pools/<pool>/override`，带过期时间；记入限速事件。不需要改配置、不需要重启 |
 
-**上游错误的分类**：把常见错误归成几类，写进账本的 `error_class`，供统计和告警用：
+**上游错误的分类**：把常见错误归成几类，写进账本的 `error_class`，供统计和告警用。按顺序判断，先命中的算（`protocol/__init__.py`）：
 
 | 类别 | 典型信号 | 含义 |
 |------|---------|------|
-| `upstream_timeout` | `ETIMEDOUT`、`fetch failed` | 9router 连上游超时，常和大上下文请求一起出现 |
+| `account_auth` | 401、403；或者错误体里有 `authentication_error`、`permission_error`、`OAuth access token has been revoked`、`invalid_grant`、`token_expired`、`refresh_token_reused`、`account_on_hold`、账户被停用等字样（**不看状态码**：9router 刷新 OAuth 失败时可能返回 5xx） | **账户授权失效或被暂停**，需要人工处理。同一个池连续出现时立即告警（§6.4） |
 | `upstream_overloaded` | 529、`overloaded` | 上游满载，和本地无关 |
-| `upstream_rate_limited` | 429、`rate_limit` | 上游订阅的窗口用满了 |
-| `account_auth` | 401、`OAuth access token has been revoked`、`invalid_grant`、`account_on_hold` | **账户授权失效或被暂停**，需要人工处理。同一个池连续出现时立即告警 |
-| `client_error` | 其他 4xx | 请求本身的问题 |
+| `upstream_rate_limited` | 429、`rate_limit`、`usage_limit_reached` | 上游订阅的窗口用满了 |
+| `upstream_timeout` | 408、502、504；5xx 且带 `ETIMEDOUT`、`fetch failed`、`timed out`、`socket hang up`；连上了 9router 但等响应超时 | 9router 连上游超时，常和大上下文请求一起出现 |
+| `router_unreachable` | 灵渠连不上 9router（连接被拒、连接超时） | **本地问题**：9router 挂了、网络策略、地址配错。连续出现时告警 |
+| `client_error` | 其他 4xx | 请求本身的问题。不影响告警的连续计数 |
+| `upstream_error` | 其他 5xx | 其他上游故障 |
+
+- **流里的错误也要分类**：上游先回了 200、开始流式输出，之后才出错（Anthropic 的 `event: error`，Responses 的 `response.failed` 或 `error` 事件，chat 流里带 `error` 的块）。这时状态码是 200，按事件里的错误类型分类（`overloaded_error` → `upstream_overloaded`，`rate_limit_error` → `upstream_rate_limited`，`authentication_error` / `permission_error` → `account_auth`，其他 → `upstream_error`）。已经计入的输入费用保留。
+- 错误体在转给客户端**之前**先留下前 4 KB 用于分类，客户端中途断开也不影响分类和告警内容。
 
 ### 4.8 识别用户（可选）
 
@@ -524,9 +579,9 @@ HTTP in
   │                  openai.chat      /v1/chat/completions
   │                  openai.responses /v1/responses
   │                  anthropic        /v1/messages, /v1/messages/count_tokens
-  │                read (never rewrite) model, stream, metadata.user_id from the raw body
+  │                read (never rewrite) model, stream, metadata.user_id, prompt_cache_key from the raw body
   ├─ price         normalize the model name (§3.3) → price
-  ├─ gate          concurrency → rpm → hourly_cap / hourly_budget → cycle_cap, cheapest check first
+  ├─ gate          session clock: warm / cold → hourly_cap / hourly_budget → cycle_cap → concurrency → rpm
   │                └─ not released: hold (default) / reject (503) / downgrade / shadow
   ├─ forward       swap only Authorization / x-api-key for the 9router key, drop hop-by-hop headers;
   │                every other header and the body go through byte for byte
@@ -568,11 +623,16 @@ HTTP in
     "step": { "at": 1.0, "gap": 15 },
     "next_departure": 1792549312,       // earliest time the queue head may leave
     "clear_at": 1792550100,             // when spent_1h drops below the limit if nothing new comes in
-    "held": 2, "in_flight": 1,          // queue length, requests streaming now
+    "held": 2, "held_cold": 1,          // queue length; of those, requests that rebuild the cache
+    "in_flight": 1,                     // requests streaming now
     "wait_p50_1h": 14, "wait_max_1h": 52,
+    "sessions": { "aware": true, "warm": 3 },   // session-aware queue on; sessions whose cache is warm
+    "concurrency": { "in_flight": 1, "peak_1h": 2, "max": null, "shadow_max": 3,
+                     "would_hold_1h": { "concurrency": 0 } },   // shadow rules: requests they would have held
     "budget": null,                     // H(t) and its inputs, third version
     "quota": null,                      // upstream used% per window, third version
-    "last_error": null                  // e.g. {"class": "account_auth", "at": ..., "count": 12}
+    "last_error": null                  // e.g. {"class": "account_auth", "at": ..., "count": 12, "streak": 3,
+                                        //       "alerted": true, "detail": "<first 300 bytes of the error>"}
   }]
 }
 ```
@@ -591,6 +651,8 @@ HTTP in
 - **每个请求的上下文大小**（`input_uncached + cache_read + cache_write`）的平均、P50、P90、最大值，超过 200k 的次数；
 - **缓存命中率**（`cache_read / 上下文总量`）和写缓存占比；
 - 挂起时长的 P50 / P90，挂起超时次数；
+- 冷请求（`cache_state=cold`）的个数和费用占比：会话感知值不值得开，先看这个（§4.5.1）；
+- 最高并发（按账本里每个请求的转发时刻和时长算）、shadow 规则本该挡住的次数：并发上限从 shadow 改成执行之前看这两个（§4.3 ④）；
 - 按小时或按天的费用序列。
 
 **经验阈值**（供部署方的日报或提示参考，灵渠只给数字）：同一个用户或会话一天超过 20 个请求时，Claude 平均上下文超过 250k、Codex 超过 150k，说明该压缩上下文了；缓存命中率低于 85%（正常在 90% 以上），说明经常停顿超过 5 分钟；失败率超过 10%，按错误类别判断是上游问题还是本地配置。
@@ -601,7 +663,7 @@ HTTP in
 
 - 某个池进入限速、解除限速（可关）；
 - 挂起超时返回 503；
-- `account_auth` 类错误（账户授权失效或被暂停）；
+- `account_auth`（账户授权失效或被暂停）、`router_unreachable`（连不上 9router）：同一个池**连续** `notify.auth_streak`（默认 2）个响应都是这一类时立即告警，同一段连续只告警一次；中间有成功的响应就算恢复，再推一条"已恢复"。告警内容带上游错误体的前 300 字节，便于区分是账户被撤销还是灵渠的 key 配错。两者都另记一条限速事件（`account_auth` / `account_auth_recovered` 等），在状态页的事件列表里能看到；
 - 价格超过 24 小时没同步成功，或出现未定价的模型；
 - 闸门内部异常、账本写入积压。
 
@@ -621,8 +683,13 @@ flask replay --source ledger|newapi --pool team-a/claude --from 2026-10-14 --to 
   - 每个会话（拿不到会话时按用户）串行发请求：一个请求被挡住，这个会话后面的请求跟着往后推，费用不丢、只推迟；
   - 被挡住的请求：`hold` 按策略等到放行；`reject` 按 Claude Code 的退避重试（第 n 次等 0.5 秒 × 2^(n−1)，最长 32 秒，加 0～25% 抖动，10 次用完算一次报错，30 秒后重发）；
   - **缓存过期的代价**：一个请求如果因为被推迟，离同一会话上一个请求的开始时间超过 5 分钟，就把它读的缓存按"写缓存价 − 读缓存价"补算一次重建费用。
-- **输出**：每种策略一行，列出 60 分钟最高费用、因缓存过期多花的钱、最长一次连续停、单个请求最长等待、报错次数、被挡请求的中位等待、每个会话的累计推迟。
-- **局限**：缓存模型只看开始时间间隔，不区分同一个人的多个会话（拿不到会话 id 时），也不算子 agent 的缓存。
+  - **会话感知**（`session_aware: true`）：和闸门同一套放行期限（§4.5.1）；`warm_deadline: false` / `cold_cap: false` 可以只回放其中一半；
+  - **并发上限**（`concurrency: N`）：同时进行的请求不超过 N 个，用账本里的时长；
+- **策略文件**的键：`name`、`limit`、`release`（`fifo` / `phase` / `none`）、`on_exceed`、`fifo`、`phase`、`scale`、`hold_cap_cached`、`hold_cap_cold`、`max_hold`、`max_queue`、`cache_ttl`、`session_aware`、`warm_deadline`、`cold_cap`、`concurrency`、`visible`。M3 的对比集在 `docs/replay/m3.yaml`。
+- **冷 / 热判断的核对**：有读写缓存 token 数的数据（账本、jsonl），先按"会话距上一个请求是否超过 `cache_ttl`"预测冷热，再和实际（写缓存的 token 是否多于读缓存的）对照，打印四格表和各自的金额。`warm/rebuilt` 多，说明这个池里换模型、子 agent 多，会话感知的判断不准。
+- **输出**：每种策略一行，列出 60 分钟最高费用、因缓存过期多花的钱、总花费、被挡请求数、被挡请求等待的中位 / P90 / 最长、热请求的中位 / 最长等待、冷请求的中位等待、按期限提前放行的次数、最长一次连续停、报错次数、总推迟时长、每个会话的累计推迟。
+- **合成负载**：`scripts/replay_synth.py` 按 §1.3、§4.5 的真实数字生成 Claude Code 式的流量（人数、天数、忙碌程度可调），写成 jsonl 给 `flask replay --source jsonl`，或者直接跑对比并对多个随机种子取平均。它是模型，不是数据：用来看"人更多时策略怎么表现"，上线前仍以池自己的账本为准。
+- **局限**：缓存模型只看开始时间间隔，不区分同一个人的多个会话（拿不到会话 id 时），也不算子 agent 的缓存。New API 日志源没有会话 id，按用户当会话，会话感知的回放在这个数据源上不准，优先用账本。
 
 ---
 
@@ -652,7 +719,8 @@ defaults:
   max_hold: 150s                      # a held request gets a 503 after this
   max_queue: 8                        # held requests per pool beyond this get a 503
   hold_cap_cached: 120s               # a request that would hit the prompt cache is never held longer
-  hold_cap_cold: 300s                 # second version: a request that rebuilds the cache anyway
+  hold_cap_cold: 300s                 # session-aware pools: a request that rebuilds the cache anyway (capped at max_hold)
+  cache_ttl: 5m                       # prompt cache lifetime: decides warm / cold (§4.4)
   default_price:
     claude: { input: 5, output: 25 }
     codex:  { input: 4, output: 20 }
@@ -689,7 +757,7 @@ pools:
     upstream: router-team-a
     keys: ["${LQ_TEAM_A_CLAUDE}"]
     rules:
-      - { kind: hourly_cap, limit: 20, on_exceed: hold, release: fifo }
+      - { kind: hourly_cap, limit: 20, on_exceed: hold, release: fifo }   # session_aware: true after a replay (§4.5.1)
       - { kind: concurrency, max: 3, on_exceed: hold, mode: shadow }
   - name: team-a/codex
     kind: codex
@@ -700,6 +768,7 @@ pools:
 
 notify:
   webhook: ""
+  auth_streak: 2                      # account_auth / router_unreachable responses in a row before an alert
 ```
 
 按模型分池、动态小时预算、周期上限的写法见附录 A。
@@ -708,7 +777,7 @@ notify:
 
 一条命令核对配置和整条链路，任何一项失败都以非零退出，适合放进部署脚本和定时任务：
 
-1. 配置文件合法：池名、key 唯一；每把 key 只属于一个池；`fifo` / `phase` 的档位从 `at = 1.0` 开始、依次增大；`gap` 超过默认值 1.5 倍、`off` 超过 `hold_cap_cached` 时报警告。
+1. 配置文件合法：池名、key 唯一；每把 key 只属于一个池；`fifo` / `phase` 的档位从 `at = 1.0` 开始、依次增大；`gap` 超过默认值 1.5 倍、`off` 超过 `hold_cap_cached` 时报警告；`session_aware` 只能用在 `release: fifo` 的 `hourly_cap` 上，一个池里执行中的 `hourly_cap` 要么都开、要么都不开；`cache_ttl` 在 1 分钟到 1 小时之间；`hold_cap_cold` 短于 `hold_cap_cached` 时报警告。
 2. 每个 9router 可达，用它的 key 请求 `/v1/models` 返回 200。
 3. **Dashboard 入口**：关闭状态下入口端口不转发；打开状态下，入口对 LLM 路径（`/v1/models`）返回 404。9router 本身的端口从灵渠以外的地址访问不通（需要部署方提供一个外部探测点时才检查）。
 4. **隔离交叉验证**：池 A 的 9router key 拿去请求池 B 的 9router（不同实例时），必须返回 401。
@@ -736,7 +805,8 @@ ledger(id, ts, pool, key_ref, session_tag, user_tag, protocol, endpoint,
        usage_source,                          -- upstream | estimated
        eusd, price_ref,                       -- price snapshot used
        held_ms, ttfb_ms, duration_ms,
-       gate_result)                           -- pass | held | rejected | shadow_would_hold | ...
+       gate_result,                           -- pass | held | released_by_cap | rejected | shadow_would_hold | gate_error
+       cache_state)                           -- warm | cold | none, from the session clock (§4.4); migration 0002
 
 -- throttle start / step change / end, overrides, hold timeouts
 gate_events(id, ts, pool, event, ratio, spent_1h, limit_value, step JSON, detail JSON)
@@ -756,7 +826,7 @@ budget_snapshots(pool, scope_key, ts, trigger, remaining_r, weight_now, weight_r
 upstream_quota(pool, ts, window, used_pct, reset_at, source)
 ```
 
-重启恢复：先加载 `counter_snapshots`，再用 `ledger` 中快照时间之后的记录重放。
+重启恢复：先加载 `counter_snapshots`，再用 `ledger` 中快照时间之后的记录重放；会话时钟也从 `ledger` 最近的记录恢复（§4.4）。
 
 ---
 
@@ -837,7 +907,7 @@ lingqu/
 │   │   ├── budget.py        #   hourly budget H(t) (third version)
 │   │   ├── hold.py          #   per-pool hold queue: Condition, max_hold, max_queue
 │   │   ├── limits.py        #   concurrency, rpm
-│   │   └── sessions.py      #   last request time per Claude Code session
+│   │   └── sessions.py      #   session ids, last start per (pool, session): warm / cold (§4.4)
 │   ├── observe/             # status, stats, events, error classes, webhook
 │   ├── ledger.py            # batched writer thread; window replay on start
 │   ├── replay.py            # flask replay
@@ -863,7 +933,7 @@ lingqu/
 - **线程数**：每个流式请求、每个挂起中的请求各占一个线程，直到结束。Dashboard 入口的请求也占线程，但只在打开时才有，量很小。
   - 取峰值并发的 4 倍以上，比如峰值十几个，取 64。
   - `max_queue × 池数` 要小于线程数，保证挂起的请求不会把线程占满。占满的话，新连接会在 accept 队列里干等，连 503 都拿不到。
-- **排队怎么实现**：每个池一个 FIFO（`collections.deque`）加一个 `threading.Condition`。请求线程进队后在 Condition 上 `wait(timeout)`；出队条件是"自己在队首，且离上一次出队已过 `gap(ratio)`"，或者"已经等满 `hold_cap_cached`"。每次出队、费用回落、配置重载、管理员覆盖都 `notify_all`，被唤醒的线程重新判断。客户端断开时把自己从队列里移除。
+- **排队怎么实现**：每个池一个 FIFO（`collections.deque`）加一个 `threading.Condition`。请求线程进队后在 Condition 上 `wait(timeout)`；出队条件是"自己在队首，且离上一次出队已过 `gap(ratio)`"，或者"已经等满自己的期限"（普通 FIFO 是 `hold_cap_cached`；会话感知时按 §4.5.1 每个请求不同，队首也换成期限最早的那个）；金额放行之后还要有空的并发名额。每次出队、费用回落、配置重载、管理员覆盖都 `notify_all`，被唤醒的线程重新判断。客户端断开时把自己从队列里移除。
 - **后台线程**：在 `create_app()` 里启动（只在 gunicorn worker 里，测试和 CLI 里不启动），都是 daemon 线程，每个线程定期更新心跳，`/healthz` 检查心跳：
   - 价格同步（10 分钟）；
   - 账本批量写入（每秒或攒满 100 条）；
@@ -916,7 +986,7 @@ class Adapter(Protocol):
 |------|------|----------|
 | **M1 透传 + 计量** | flasky 骨架；按 key 分池；透传四个端点，请求头和请求体不改；SSE 逐块透传；三种协议的 usage 解析（Anthropic 在 `message_start` 计入）；价格同步（New API / 9router / 静态）；账本；`/status`、`/stats`；`flask check`；`flask replay`（New API 日志源） | 在真实部署上跑影子模式一周：每个池每小时费用和 New API 日志偏差不超过 3%；Claude Code 在 9router 里仍然走原生直通；缓存命中率不变；10 分钟的长流不被截断；首字节延迟增加不超过 50 ms |
 | **M2 能控** | `hourly_cap` + `fifo`（默认）和 `phase`（对照）+ 队首超时 + 503 兜底（`max_hold`、`max_queue`）；限速事件；重启恢复；热重载；管理员覆盖；告警；**Dashboard 入口**（关闭 / 临时 / 保持打开、opener token、开关页、审计） | 先用 `flask replay` 在 New API 日志上比较 `fifo`、`phase` 和原有限速方案；再选一个池试点：排队生效、没有 503、客户端不显示重试倒计时，实际等待和回放一致 |
-| **M3 更细** | `fifo` + 会话感知（会命中缓存的排前面，要重建的排后面、可以等更久），先用更多数据回放验证；每池并发上限（先 shadow）；错误分类与 `account_auth` 告警 | 回放：60 分钟最高费用或等待时间比 M2 的 `fifo` 有明显改善，否则不上 |
+| **M3 更细**（已实现，v0.6） | `fifo` + 会话感知（会命中缓存的排前面，要重建的排后面、可以等更久），先用更多数据回放验证；每池并发上限（先 shadow）；错误分类与 `account_auth` 告警 | 回放：60 分钟最高费用或等待时间比 M2 的 `fifo` 有明显改善，否则不上。合成数据上：两人的池没有差别，三人以上经常超限的池峰值低 3.5%～8%、缓存过期多花的钱归零（§4.5.1）。所以默认关闭，各池用自己的账本回放后按池打开 |
 | **M4 动态预算** | 9router 额度采集；`hourly_budget` + 小时权重 + 周期上限；紧急刹车 | `H(t)` 先只展示两周，和固定限额的差异可以解释，再切换 |
 | **M5 可选** | 控制台（Jinja2 + Bootstrap）、9router 管理器、按模型分池的完整规则、Redis 多实例、用户级限流 | — |
 
@@ -944,7 +1014,7 @@ class Adapter(Protocol):
 
 ## 16. 一句话总结
 
-**New API 管"谁能用、该收多少钱"，9router 管"怎么连上 Codex / Claude"，灵渠管"每个订阅能撑多久"**：用从 New API 或 9router 同步来的价格，把 token 折算成等价金额，按池分别核算；在数据路径上就地计量，大请求一开始就计入；超限时让请求在 FIFO 里排队、按间隔匀速放出，而不是报错或整段停放，每次等待都控制在 prompt cache 的寿命以内；规则先用回放验证再上线，之后再加会话感知和动态小时预算。
+**New API 管"谁能用、该收多少钱"，9router 管"怎么连上 Codex / Claude"，灵渠管"每个订阅能撑多久"**：用从 New API 或 9router 同步来的价格，把 token 折算成等价金额，按池分别核算；在数据路径上就地计量，大请求一开始就计入；超限时让请求在 FIFO 里排队、按间隔匀速放出，而不是报错或整段停放，每次等待都控制在 prompt cache 的寿命以内；规则先用回放验证再上线；会话感知让每个热请求赶在自己的缓存过期前放行，按池回放后打开；之后再加动态小时预算。
 
 ---
 

@@ -1,5 +1,5 @@
 """OpenAI /v1/responses: the usage is in response.completed (or .incomplete / .failed)."""
-from .base import Tracker, num
+from .base import Tracker, error_of, num
 
 FINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed")
 
@@ -21,6 +21,10 @@ class ResponsesTracker(Tracker):
         if kind in FINAL_EVENTS and resp and isinstance(resp.get("usage"), dict):
             read_usage(resp["usage"], self.usage)
             self.input_ready = self.complete = True
+        if kind == "response.failed" and resp:
+            self.error = error_of(resp) or ("server_error", "response.failed")
+        elif kind == "error":
+            self.error = error_of(obj) or (str(obj.get("code") or "error"), str(obj.get("message") or "")[:500])
 
     def _final(self, obj):
         self.model = obj.get("model") or self.model

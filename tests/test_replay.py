@@ -53,3 +53,56 @@ class ReplayTestCase(unittest.TestCase):
         p = rp.policy_from("x", {"release": "fifo", "limit": 15, "scale": 2}, 20)
         self.assertEqual(p.limit, 15)
         self.assertEqual(p.fifo[0], (1.0, 30.0))
+
+
+def session_traffic(sessions=4, n=60):
+    """Sessions that each send a warm $0.3 request every 40 s, and every 10th request after a
+    4.5-minute pause: still warm, but with little of its cache life left."""
+    reqs = []
+    for k in range(sessions):
+        t = 1_800_000_000 + k * 7
+        for i in range(n):
+            t += 270 if i % 10 == 9 else 40
+            reqs.append(rp.Req(t=t, session=f"s{k}", model="m", cost=0.3, cost_input=0.28, ttfb=1, dur=8,
+                               cache_read=600_000, cache_write=2_000, rebuild_per_token=5.75e-6))
+    return sorted(reqs, key=lambda r: r.t)
+
+
+class SessionAwareReplayTestCase(unittest.TestCase):
+    def test_warm_deadline_avoids_cache_expiry(self):
+        reqs = session_traffic()
+        fifo = rp.simulate(reqs, rp.Policy(name="fifo", release="fifo", limit=10))
+        aware = rp.simulate(reqs, rp.Policy(name="aware", release="fifo", limit=10, session_aware=True))
+        self.assertGreater(fifo["penalty"], 0)
+        self.assertEqual(aware["penalty"], 0)
+        self.assertLessEqual(aware["peak"], fifo["peak"])
+        self.assertEqual(aware["errors"], 0)
+
+    def test_cold_requests_wait_longer_not_fail(self):
+        reqs = burst()                                  # the first request of each session is cold
+        p = rp.Policy(name="aware", release="fifo", limit=20, session_aware=True, hold_cap_cold=150,
+                      fifo=[(1.0, 200)])
+        r = rp.simulate(reqs, p)
+        self.assertEqual(r["errors"], 0)
+        self.assertLessEqual(r["warm_max"], 121)
+
+    def test_concurrency_cap(self):
+        reqs = [rp.Req(t=1_800_000_000 + i, session=f"s{i}", model="m", cost=0.1, cost_input=0.1, ttfb=1, dur=100)
+                for i in range(5)]
+        r = rp.simulate(reqs, rp.Policy(name="c2", release="none", concurrency=2))
+        self.assertEqual(r["requests"], 5)
+        self.assertGreaterEqual(r["wait_max"], 190)     # the fifth starts after two rounds of 100 s
+        free = rp.simulate(reqs, rp.Policy(name="free", release="none"))
+        self.assertEqual(free["held"], 0)
+
+    def test_classify_check(self):
+        reqs = [rp.Req(t=0, session="a", model="m", cost=3, cost_input=3, ttfb=1, dur=5, cache_read=0, cache_write=600_000),
+                rp.Req(t=60, session="a", model="m", cost=0.3, cost_input=0.3, ttfb=1, dur=5, cache_read=600_000, cache_write=1000),
+                rp.Req(t=700, session="a", model="m", cost=3, cost_input=3, ttfb=1, dur=5, cache_read=0, cache_write=601_000),
+                rp.Req(t=760, session="a", model="m", cost=3, cost_input=3, ttfb=1, dur=5, cache_read=0, cache_write=602_000)]
+        c = rp.classify_check(reqs)["counts"]
+        self.assertEqual(c, {"cold/rebuilt": 2, "warm/hit": 1, "warm/rebuilt": 1})
+
+    def test_policy_file_session_keys(self):
+        p = rp.policy_from("x", {"session_aware": True, "hold_cap_cold": "150s", "concurrency": 3, "cache_ttl": "5m"}, 20)
+        self.assertEqual((p.session_aware, p.hold_cap_cold, p.concurrency, p.cache_ttl), (True, 150, 3, 300))

@@ -2,7 +2,7 @@ import json
 import unittest
 
 from app import protocol as proto
-from app.gate.sessions import session_tag
+from app.gate.sessions import request_session, session_tag
 from app.protocol.sse import SSEParser
 
 
@@ -108,3 +108,50 @@ class ProtocolTestCase(unittest.TestCase):
         self.assertEqual(proto.classify_error(500, "fetch failed"), "upstream_timeout")
         self.assertEqual(proto.classify_error(400, "bad"), "client_error")
         self.assertIsNone(proto.classify_error(200, ""))
+
+
+class M3ProtocolTestCase(unittest.TestCase):
+    def test_session_from_prompt_cache_key(self):
+        f = proto.read_fields(json.dumps({"model": "gpt-6.1-sol", "prompt_cache_key": "conv-42"}).encode())
+        self.assertEqual(request_session(f), "conv-42")
+        f = proto.read_fields(json.dumps({"model": "m", "metadata": {"user_id": "user_x_session_abcd1234-ef"},
+                                          "prompt_cache_key": "other"}).encode())
+        self.assertEqual(request_session(f), "abcd1234-ef")         # Claude Code's own id wins
+        self.assertEqual(request_session(proto.read_fields(b'{"prompt_cache_key": 5}')), "")
+
+    def test_more_error_signals(self):
+        c = proto.classify_error
+        self.assertEqual(c(403, "Forbidden"), "account_auth")
+        self.assertEqual(c(500, '{"error":"invalid_grant: refresh token expired"}'), "account_auth")
+        self.assertEqual(c(400, '{"error":{"code":"refresh_token_reused"}}'), "account_auth")
+        self.assertEqual(c(429, ""), "upstream_rate_limited")
+        self.assertEqual(c(400, "usage_limit_reached"), "upstream_rate_limited")
+        self.assertEqual(c(400, "timeout must be positive"), "client_error")   # a 4xx about a timeout field
+        self.assertEqual(c(504, ""), "upstream_timeout")
+        self.assertEqual(c(500, "socket hang up"), "upstream_timeout")
+        self.assertEqual(c(500, "boom"), "upstream_error")
+
+    def test_errors_inside_a_200_stream(self):
+        t = proto.TRACKERS[proto.ANTHROPIC](True)
+        t.feed(ANTHROPIC_STREAM.split(b"event: message_delta")[0])
+        t.feed(sse(("error", {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})))
+        t.close()
+        self.assertEqual(t.error, ("overloaded_error", "Overloaded"))
+        self.assertEqual(proto.classify_stream_error(t.error), "upstream_overloaded")
+
+        t = proto.TRACKERS[proto.OPENAI_RESPONSES](True)
+        t.feed(sse(("response.failed", {"type": "response.failed", "response": {
+            "model": "gpt", "error": {"code": "rate_limit_exceeded", "message": "slow down"}}})))
+        self.assertEqual(proto.classify_stream_error(t.error), "upstream_rate_limited")
+        t = proto.TRACKERS[proto.OPENAI_RESPONSES](True)
+        t.feed(sse(("error", {"type": "error", "code": "server_error", "message": "x"})))
+        self.assertEqual(proto.classify_stream_error(t.error), "upstream_error")
+
+        t = proto.TRACKERS[proto.OPENAI_CHAT](True)
+        t.feed(sse((None, {"error": {"type": "authentication_error", "message": "token has been revoked"}})))
+        self.assertEqual(proto.classify_stream_error(t.error), "account_auth")
+
+        t = proto.TRACKERS[proto.ANTHROPIC](True)
+        t.feed(ANTHROPIC_STREAM)
+        t.close()
+        self.assertIsNone(t.error)

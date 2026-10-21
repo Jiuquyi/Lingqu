@@ -22,6 +22,22 @@ def pct(values, q):
     return values[min(len(values) - 1, int(q * len(values)))]
 
 
+def concurrency_peak(rows):
+    """Most requests upstream at once: each row runs from its departure (arrival + held) for its
+    duration. Requests the gate turned away never ran."""
+    edges = []
+    for r in rows:
+        if r.gate_result == "rejected" or not r.duration_ms:
+            continue
+        start = r.ts + (r.held_ms or 0) / 1000
+        edges += [(start, 1), (start + r.duration_ms / 1000, -1)]
+    peak = n = 0
+    for _, d in sorted(edges, key=lambda e: (e[0], e[1])):   # an end before a start at the same instant
+        n += d
+        peak = max(peak, n)
+    return peak
+
+
 def summarize(rows):
     ctx = [r.input_tokens + r.cache_read_tokens + r.cache_write_5m_tokens + r.cache_write_1h_tokens for r in rows]
     total_ctx = sum(ctx)
@@ -29,11 +45,13 @@ def summarize(rows):
     cache_write = sum(r.cache_write_5m_tokens + r.cache_write_1h_tokens for r in rows)
     held = [r.held_ms / 1000 for r in rows if (r.held_ms or 0) > 0]
     errors = collections.Counter(r.error_class for r in rows if r.error_class)
+    eusd = sum(r.eusd or 0 for r in rows)
+    cold = [r for r in rows if r.cache_state == "cold"]
     return {
         "requests": len(rows), "errors": sum(errors.values()), "error_classes": dict(errors),
         "tokens": {"input": sum(r.input_tokens for r in rows), "cache_read": cache_read,
                    "cache_write": cache_write, "output": sum(r.output_tokens for r in rows)},
-        "eusd": round(sum(r.eusd or 0 for r in rows), 4),
+        "eusd": round(eusd, 4),
         "context": {"avg": round(total_ctx / len(ctx)) if ctx else None, "p50": pct(ctx, 0.5),
                     "p90": pct(ctx, 0.9), "max": max(ctx) if ctx else None,
                     "over_200k": sum(1 for c in ctx if c > 200_000)},
@@ -41,6 +59,11 @@ def summarize(rows):
         "cache_write_share": round(cache_write / total_ctx, 4) if total_ctx else None,
         "held": {"count": len(held), "p50": pct(held, 0.5), "p90": pct(held, 0.9),
                  "timeouts": sum(1 for r in rows if r.gate_result == "rejected")},
+        # Requests the session clock saw as cold (they rebuild the prompt cache) and their share of the money.
+        "cold": {"count": len(cold), "eusd": round(sum(r.eusd or 0 for r in cold), 4),
+                 "eusd_share": round(sum(r.eusd or 0 for r in cold) / eusd, 4) if eusd else None},
+        "concurrency_peak": concurrency_peak(rows),
+        "shadow_would_hold": sum(1 for r in rows if r.gate_result == "shadow_would_hold"),
     }
 
 

@@ -9,6 +9,8 @@ class Tracker:
 
     `input_ready` turns true as soon as the input side is known (Anthropic message_start), so
     the proxy can count it before the response ends; `complete` when the final usage arrived.
+    `error` is (type or code, message) of an error the upstream reported inside a response
+    that had already started with a 200.
     """
 
     def __init__(self, stream):
@@ -17,6 +19,7 @@ class Tracker:
         self.model = ""
         self.input_ready = False
         self.complete = False
+        self.error = None
         self.sse = SSEParser() if stream else None
         self.body = bytearray()
 
@@ -54,6 +57,16 @@ class Tracker:
 
     def _final(self, obj):
         raise NotImplementedError
+
+
+def error_of(obj):
+    """(type or code, message) from an {"error": {...}} or {"error": "text"} object, else None."""
+    e = obj.get("error") if isinstance(obj, dict) else None
+    if isinstance(e, dict):
+        return str(e.get("type") or e.get("code") or "error"), str(e.get("message") or "")[:500]
+    if isinstance(e, str) and e:
+        return "error", e[:500]
+    return None
 
 
 def num(d, *path):

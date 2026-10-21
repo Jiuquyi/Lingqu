@@ -22,6 +22,8 @@ defaults:
   max_hold: 150s                      # a held request gets a 503 after this
   max_queue: 8                        # held requests per pool beyond this get a 503
   hold_cap_cached: 120s               # a held request is let through after this, whatever the ratio
+  hold_cap_cold: 300s                 # session-aware pools: a request that rebuilds the cache anyway (at most max_hold)
+  cache_ttl: 5m                       # prompt cache lifetime: a session idle longer than this is cold
   default_price:
     claude: { input: 5, output: 25 }
     codex:  { input: 4, output: 20 }
@@ -58,8 +60,9 @@ pools:
     upstream: router-team-a
     keys: ["${LQ_TEAM_A_CLAUDE}"]
     rules:
+      # add session_aware: true once `flask replay --policy docs/replay/m3.yaml` shows it helps (DESIGN §4.5.1)
       - { kind: hourly_cap, limit: 20, on_exceed: hold, release: fifo }
-      - { kind: concurrency, max: 3, on_exceed: hold, mode: shadow }
+      - { kind: concurrency, max: 3, on_exceed: hold, mode: shadow }   # watch /status concurrency first
   - name: team-a/codex
     kind: codex
     upstream: router-team-a
@@ -69,3 +72,4 @@ pools:
 notify:
   webhook: ""                         # generic JSON POST; convert to Feishu etc. on the receiving side
   throttle_events: true
+  auth_streak: 2                      # account_auth / router_unreachable responses in a row before an alert

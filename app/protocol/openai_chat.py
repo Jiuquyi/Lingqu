@@ -1,6 +1,6 @@
 """OpenAI /v1/chat/completions: usage arrives in the last chunk, and only when the client asked
 for stream_options.include_usage; without it the output is estimated from the bytes sent."""
-from .base import Tracker, num
+from .base import Tracker, error_of, num
 
 
 def read_usage(u, usage):
@@ -15,6 +15,7 @@ def read_usage(u, usage):
 
 class ChatTracker(Tracker):
     def on_event(self, event, obj):
+        self.error = error_of(obj) or self.error
         self.model = obj.get("model") or self.model
         if isinstance(obj.get("usage"), dict) and obj["usage"]:
             read_usage(obj["usage"], self.usage)

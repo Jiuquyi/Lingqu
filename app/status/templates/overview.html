@@ -62,6 +62,7 @@
       {% elif p.state == "override" %}<span class="badge warn">已临时取消限额</span>
       {% elif p.limit %}<span class="badge ok">放行</span>
       {% else %}<span class="badge">只计量</span>{% endif %}
+      {% if p.sessions and p.sessions.aware %}<span class="badge">会话感知</span>{% endif %}
       {% if p.override and p.override.action == "limit" %}<span class="badge warn">临时限额 ${{ "%.2f" | format(p.override.value) }}</span>{% endif %}
     </div>
     {% if p.limit %}
@@ -71,12 +72,13 @@
       <dt>最近 60 分钟</dt><dd>${{ "%.2f" | format(p.spent_1h) }}{% if p.limit %} / ${{ "%g" | format(p.limit) }}（{{ "%.0f" | format(pct) }}%）{% endif %}</dd>
       {% if p.state == "queuing" %}
       <dt>放行间隔</dt><dd>{% if p.step and p.step.gap %}每 {{ "%g" | format(p.step.gap) }} 秒一个{% elif p.step %}停 {{ p.step.off }} 秒 / 放 {{ p.step.on }} 秒{% endif %}</dd>
-      <dt>排队</dt><dd>{{ p.held }} 个{% if p.next_departure %} · 下一个 {{ p.next_departure | clock }}{% endif %}</dd>
+      <dt>排队</dt><dd>{{ p.held }} 个{% if p.held_cold %}（{{ p.held_cold }} 个要重建缓存）{% endif %}{% if p.next_departure %} · 下一个 {{ p.next_departure | clock }}{% endif %}</dd>
       {% if p.clear_at %}<dt>预计解除</dt><dd>{{ p.clear_at | clock }}（没有新花费的话）</dd>{% endif %}
       {% endif %}
-      <dt>进行中</dt><dd>{{ p.in_flight }}</dd>
+      {% set c = p.concurrency %}
+      <dt>进行中</dt><dd>{{ p.in_flight }}{% if c %}（1 小时最多 {{ c.peak_1h }}{% if c.max %} · 上限 {{ c.max }}{% endif %}{% if c.shadow_max %} · 影子上限 {{ c.shadow_max }}，本该排队 {{ c.would_hold_1h.concurrency or 0 }} 次{% endif %}）{% endif %}</dd>
       {% if p.wait_max_1h %}<dt>1 小时排队</dt><dd>中位 {{ p.wait_p50_1h }} 秒 · 最长 {{ p.wait_max_1h }} 秒</dd>{% endif %}
-      {% if p.last_error %}<dt>最近错误</dt><dd class="warn">{{ p.last_error.class }} × {{ p.last_error.count }} · {{ p.last_error.at | ago }}</dd>{% endif %}
+      {% if p.last_error %}<dt>最近错误</dt><dd class="{{ 'bad' if p.last_error.alerted else 'warn' }}" title="{{ p.last_error.detail }}">{{ p.last_error.class }} × {{ p.last_error.count }}{% if p.last_error.streak %} · 连续 {{ p.last_error.streak }} 次{% endif %} · {{ p.last_error.at | ago }}</dd>{% endif %}
     </dl>
   </div>
 {% endfor %}
@@ -89,7 +91,8 @@
 <div class="wrap">
 <table>
 <tr><th>池</th><th class="n">请求</th><th class="n">失败</th><th class="n">折算费用</th><th class="n">平均上下文</th><th class="n">P90 上下文</th>
-    <th class="n">缓存命中</th><th class="n">输出 tokens</th><th class="n">排队次数</th><th class="n">排队中位 / P90</th><th class="n">排队超时</th></tr>
+    <th class="n">缓存命中</th><th class="n">输出 tokens</th><th class="n">排队次数</th><th class="n">排队中位 / P90</th><th class="n">排队超时</th>
+    <th class="n">冷请求（费用占比）</th><th class="n">最高并发</th><th class="n">影子拦截</th></tr>
 {% for name, s in rows %}
 <tr>
   <td><code>{{ name }}</code></td>
@@ -103,6 +106,9 @@
   <td class="n">{{ s.held.count }}</td>
   <td class="n">{% if s.held.count %}{{ "%.0f" | format(s.held.p50) }} / {{ "%.0f" | format(s.held.p90) }} 秒{% else %}—{% endif %}</td>
   <td class="n {{ 'bad' if s.held.timeouts }}">{{ s.held.timeouts }}</td>
+  <td class="n">{{ s.cold.count }}（{{ s.cold.eusd_share | percent }}）</td>
+  <td class="n">{{ s.concurrency_peak }}</td>
+  <td class="n">{{ s.shadow_would_hold }}</td>
 </tr>
 {% else %}
 <tr><td colspan="11" class="muted">这段时间没有请求</td></tr>

@@ -46,6 +46,7 @@ class Rule:
     limit: float = 0.0          # hourly_cap: eUSD per rolling hour
     max: int = 0                # concurrency: requests in flight; rpm: requests per minute
     scope_model: str | None = None
+    session_aware: bool = False  # hourly_cap with fifo: warm requests first, cold ones wait longer
 
     @property
     def scope_key(self):
@@ -106,6 +107,7 @@ class Settings:
     max_queue: int = 8
     hold_cap_cached: float = 120
     hold_cap_cold: float = 300
+    cache_ttl: float = 300
     default_price: dict = field(default_factory=lambda: {k: dict(v) for k, v in DEFAULT_PRICE.items()})
     fifo: list = field(default_factory=lambda: list(DEFAULT_FIFO))
     phase: list = field(default_factory=lambda: list(DEFAULT_PHASE))
@@ -114,6 +116,7 @@ class Settings:
     keys: dict = field(default_factory=dict)  # key -> KeyBinding
     webhook: str = ""
     notify_throttle: bool = True
+    auth_streak: int = 2        # account_auth / router_unreachable responses in a row before an alert
     path: str = ""
 
     def dashboard_ports(self):
@@ -185,6 +188,7 @@ def load(path=None, text=None):
     notify = raw.get("notify") or {}
     s.webhook = (notify.get("webhook") or "").strip()
     s.notify_throttle = bool(notify.get("throttle_events", True))
+    s.auth_streak = int(ld.number("notify.auth_streak", notify.get("auth_streak"), 2))
     _cross_checks(ld, s)
     for var in sorted(ld.missing_env):
         ld.errors.append(f"environment variable {var} is not set")
@@ -229,6 +233,12 @@ def _defaults(ld, s, raw):
     s.max_queue = int(ld.number("defaults.max_queue", raw.get("max_queue"), 8))
     s.hold_cap_cached = ld.duration("defaults.hold_cap_cached", raw.get("hold_cap_cached"), 120)
     s.hold_cap_cold = ld.duration("defaults.hold_cap_cold", raw.get("hold_cap_cold"), 300)
+    s.cache_ttl = ld.duration("defaults.cache_ttl", raw.get("cache_ttl"), 300)
+    if s.hold_cap_cold < s.hold_cap_cached:
+        ld.warnings.append("defaults.hold_cap_cold is shorter than hold_cap_cached: in a session-aware pool "
+                           "a request that rebuilds the cache anyway would wait less than one that hits it")
+    if not 60 <= s.cache_ttl <= 3600:
+        ld.errors.append("defaults.cache_ttl: must be between 60 s and 1 h (the prompt cache lifetime)")
     if s.hold_cap_cached > s.max_hold:
         ld.warnings.append("defaults.hold_cap_cached is longer than max_hold: held requests get a 503 "
                            "before the queue-head timeout lets them through")
@@ -335,8 +345,16 @@ def _rule(ld, pool, i, raw):
     scope = raw.get("scope") or {}
     if set(scope) - {"model"}:
         ld.errors.append(f"{where}: only a model scope is supported")
+    aware = raw.get("session_aware", False)
+    if not isinstance(aware, bool):
+        ld.errors.append(f"{where}: session_aware must be true or false")
+        aware = False
+    if aware and (kind != "hourly_cap" or release != "fifo"):
+        ld.errors.append(f"{where}: session_aware applies only to an hourly_cap with release fifo")
+        aware = False
     r = Rule(kind=kind, on_exceed=on_exceed, release=release,
-             shadow=mode == "shadow" or on_exceed == "shadow", scope_model=scope.get("model"))
+             shadow=mode == "shadow" or on_exceed == "shadow", scope_model=scope.get("model"),
+             session_aware=aware)
     if kind == "hourly_cap":
         r.limit = float(ld.number(f"{where}: limit", raw.get("limit"), 0) or 0)
         if not raw.get("limit"):
@@ -369,6 +387,8 @@ def _pools(ld, s, raw):
         caps = [r for r in rules if r.kind == "hourly_cap" and not r.shadow]
         if len({r.release for r in caps}) > 1:
             ld.errors.append(f"pool {name}: all enforcing hourly_cap rules must use the same release")
+        if len({r.session_aware for r in caps}) > 1:
+            ld.errors.append(f"pool {name}: set session_aware on all of its enforcing hourly_cap rules or none")
         if len([r for r in rules if r.kind == "hourly_cap" and r.scope_model is None]) > 1:
             ld.errors.append(f"pool {name}: more than one pool-wide hourly_cap")
         match = (p.get("match") or {}).get("models") or []

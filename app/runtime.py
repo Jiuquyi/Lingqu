@@ -15,7 +15,10 @@ from .observe.notify import Notifier
 from .pricing.sync import Pricing
 
 log = logging.getLogger("lingqu")
-VERSION = "0.5.0"
+VERSION = "0.6.0"
+# Error classes that need a person, alerted when a pool sees them several times in a row.
+ALERT_CLASSES = {"account_auth": "upstream account authorization failed; re-authorize it in 9router",
+                 "router_unreachable": "cannot connect to 9router"}
 
 
 class Runtime:
@@ -77,19 +80,49 @@ class Runtime:
             self.notifier.alert("dashboard_persistent", upstream,
                                 f"9router dashboard of {upstream} kept open by {actor}")
 
-    def upstream_error(self, pool, error_class):
-        if not error_class or error_class == "client_error":
+    def upstream_result(self, pool, error_class, detail=""):
+        """Called once per metered response: error_class None for a success (DESIGN §4.7, §6.4).
+
+        last_errors[pool] keeps the latest error class, how often it came in the last 10 minutes
+        (count) and how many responses in a row ended with it (streak; a success ends a streak,
+        a client error neither extends nor ends one). account_auth and router_unreachable need a
+        person: they alert as soon as a streak reaches notify.auth_streak, and again when the pool
+        recovers."""
+        if error_class == "client_error":
             return
         now = self.clock()
         e = self.last_errors.get(pool)
-        if e and e["class"] == error_class and now - e["at"] < 600:
-            e["count"] += 1
-            e["at"] = now
+        if error_class is None:
+            if e and e.get("streak"):
+                if e.get("alerted"):
+                    self._streak_end(pool, e, now)
+                e["streak"], e["alerted"] = 0, False
+            return
+        if e and e["class"] == error_class:
+            e["count"] = e["count"] + 1 if now - e["at"] < 600 else 1
+            e["streak"] = e.get("streak", 0) + 1
+            e["at"], e["detail"] = now, (detail or "")[:300]
         else:
-            e = self.last_errors[pool] = {"class": error_class, "at": now, "count": 1}
-        if error_class == "account_auth":
-            self.notifier.alert("account_auth", pool, f"pool {pool}: upstream account authorization failed "
-                                                      f"({e['count']} in a row); needs a person to re-authorize")
+            if e and e.get("alerted"):
+                self._streak_end(pool, e, now)
+            e = self.last_errors[pool] = {"class": error_class, "at": now, "count": 1, "streak": 1,
+                                          "since": now, "detail": (detail or "")[:300], "alerted": False}
+        if error_class in ALERT_CLASSES and not e["alerted"] and e["streak"] >= self.settings.auth_streak:
+            e["alerted"] = True
+            what = ALERT_CLASSES[error_class]
+            self.notifier.alert(error_class, pool, f"pool {pool}: {what} ({e['streak']} in a row): {e['detail']}",
+                                streak=e["streak"])
+            self.ledger.add_event({"ts": now, "pool": pool, "event": error_class,
+                                   "detail": {"message": f"{what}: {e['detail']}", "streak": e["streak"]}})
+
+    def _streak_end(self, pool, e, now):
+        kind = e["class"]
+        self.notifier.forget(kind, pool)        # a new failure alerts again at once
+        self.notifier.alert(f"{kind}_recovered", pool,
+                            f"pool {pool}: {kind} cleared after {e['streak']} failures in {now - e['since']:.0f} s")
+        self.ledger.add_event({"ts": now, "pool": pool, "event": f"{kind}_recovered",
+                               "detail": {"message": f"{kind} cleared after {e['streak']} failures",
+                                          "streak": e["streak"]}})
 
     # ------------------------------------------------------------ reload
 
@@ -117,7 +150,7 @@ class Runtime:
             log.warning("loading the price snapshot failed: %s", e)
         try:
             n = restore_counters(self.app, self.gate, clock=self.clock)
-            log.info("rolling windows restored (%d ledger rows replayed)", n)
+            log.info("rolling windows and sessions restored (%d ledger rows replayed)", n)
         except Exception as e:
             log.warning("restoring the rolling windows failed: %s", e)
         self.exposure.load()
