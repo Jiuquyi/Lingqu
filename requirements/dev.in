@@ -1,0 +1,4 @@
+-r base.in
+# Development-only direct dependencies
+coverage
+gunicorn

@@ -1,0 +1,3 @@
+-r base.in
+# Docker image runtime extras
+gunicorn

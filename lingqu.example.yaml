@@ -1,0 +1,71 @@
+# lingqu.yaml: the single source of rules (DESIGN §8). Generate it from the deployment's own
+# scripts; secrets are ${ENV} references and never written here.
+server:
+  admin_token: "${LINGQU_ADMIN_TOKEN}"
+  fail_mode: open                     # open | closed (DESIGN §4.7)
+  proxy_port: 8090
+  status_port: 8091
+
+storage:
+  dsn: "sqlite:////data/lingqu.db"
+
+pricing:
+  source: newapi                      # newapi | ninerouter | static
+  newapi: { base_url: http://new-api:3000, token: "${NEWAPI_PAT}" }
+  # ninerouter: { upstream: router-team-a, password: "${ROUTER_TEAM_A_PASSWORD}" }
+  # static: { claude-opus-5-5: { input: 5, output: 25 } }
+  refresh: 10m
+  strip_prefixes: ["cc/", "cx/", "os/cx/"]
+  overrides: {}                       # model: {input, output, cache_read, cache_write_5m, cache_write_1h}
+
+defaults:
+  max_hold: 150s                      # a held request gets a 503 after this
+  max_queue: 8                        # held requests per pool beyond this get a 503
+  hold_cap_cached: 120s               # a held request is let through after this, whatever the ratio
+  default_price:
+    claude: { input: 5, output: 25 }
+    codex:  { input: 4, output: 20 }
+
+fifo:                                 # default release: from `at` x limit, seconds between departures
+  - { at: 1.0,  gap: 15 }
+  - { at: 1.25, gap: 22.5 }
+  - { at: 1.5,  gap: 30 }
+  - { at: 2.0,  gap: 45 }
+  - { at: 2.5,  gap: 60 }
+
+phase:                                # comparison only: seconds off / on
+  - { at: 1.0,  off: 45,  on: 60 }
+  - { at: 1.25, off: 75,  on: 50 }
+  - { at: 1.5,  off: 100, on: 45 }
+  - { at: 2.0,  off: 120, on: 45 }
+  - { at: 2.5,  off: 120, on: 30 }
+
+upstreams:                            # one per 9router instance
+  - name: router-team-a
+    base_url: http://router-team-a:20128
+    api_key: "${ROUTER_TEAM_A_KEY}"
+    dashboard:                        # DESIGN §2.4
+      port: 8101                      # or host: team-a.dash.example
+      default_ttl: 30m
+      max_ttl: 4h
+      allow_persistent: true
+      openers:                        # tokens that may open this dashboard besides the admin token
+        - { name: team-a, token: "${DASH_TEAM_A_TOKEN}" }
+
+pools:
+  - name: team-a/claude
+    kind: claude
+    upstream: router-team-a
+    keys: ["${LQ_TEAM_A_CLAUDE}"]
+    rules:
+      - { kind: hourly_cap, limit: 20, on_exceed: hold, release: fifo }
+      - { kind: concurrency, max: 3, on_exceed: hold, mode: shadow }
+  - name: team-a/codex
+    kind: codex
+    upstream: router-team-a
+    keys: ["${LQ_TEAM_A_CODEX}"]
+    rules: []                         # metered only
+
+notify:
+  webhook: ""                         # generic JSON POST; convert to Feishu etc. on the receiving side
+  throttle_events: true

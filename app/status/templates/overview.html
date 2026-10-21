@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="15">
+<title>灵渠状态</title>
+<style>
+  :root { --bg: #fff; --fg: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7; --wash: #f5f5f7; --accent: #0a66c2;
+          --ok: #1a7f37; --warn: #9a6700; --bad: #cf222e; --bar: #0a66c2; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161618; --fg: #f2f2f7; --muted: #a1a1a6; --line: #3a3a3c; --wash: #222225; --accent: #4c9aff;
+            --ok: #3fb950; --warn: #d29922; --bad: #f85149; --bar: #4c9aff; }
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; max-width: 90rem; margin: 1.5rem auto; padding: 0 16px; }
+  h1 { font-size: 1.4rem; margin: 0 0 .2rem; }
+  h2 { font-size: 1.05rem; margin: 1.8rem 0 .6rem; }
+  .sub, .muted { color: var(--muted); }
+  .sub { margin-bottom: 1rem; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr)); gap: 12px; }
+  .card { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .card .head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .card .name { font-weight: 600; font-family: ui-monospace, monospace; }
+  .badge { font-size: 12px; padding: 0 6px; border-radius: 4px; background: var(--wash); }
+  .meter { height: 8px; border-radius: 4px; background: var(--wash); margin: 8px 0 4px; overflow: hidden; }
+  .meter > div { height: 100%; background: var(--bar); }
+  .meter > div.warn { background: var(--warn); } .meter > div.bad { background: var(--bad); }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 6px 0 0; }
+  dt { color: var(--muted); } dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; }
+  td.n, th.n { text-align: right; }
+  nav a { color: var(--accent); margin-right: 12px; text-decoration: none; }
+  nav a.on { font-weight: 600; text-decoration: underline; }
+  code { font-family: ui-monospace, monospace; font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>灵渠状态</h1>
+<div class="sub">
+  只读 · 每 15 秒刷新 · {{ now | clock }} · v{{ status.version }} ·
+  价格 {{ status.pricing.source }}{% if status.pricing.synced_at %}（{{ status.pricing.synced_at | ago }}同步）{% endif %}
+  {% if status.pricing.stale %}<span class="warn">· 价格超过 24 小时未同步</span>{% endif %}
+  {% if status.pricing.unpriced_models %}<span class="warn">· 未定价：{{ status.pricing.unpriced_models | join(", ") }}</span>{% endif %}
+  · 健康：{% if health.ok %}<span class="ok">正常</span>{% else %}<span class="bad">异常</span>{% endif %}
+  · 挂起中 {{ status.health.held }} · 1 小时闸门错误 {{ status.health.gate_errors_1h }}
+</div>
+
+<h2>池</h2>
+<div class="grid">
+{% for p in status.pools %}
+  {% set pct = ((p.ratio or 0) * 100) %}
+  <div class="card">
+    <div class="head">
+      <span class="name">{{ p.name }}</span>
+      <span class="muted">{{ p.upstream }}</span>
+      {% if p.state == "queuing" %}<span class="badge bad">排队中</span>
+      {% elif p.state == "override" %}<span class="badge warn">已临时取消限额</span>
+      {% elif p.limit %}<span class="badge ok">放行</span>
+      {% else %}<span class="badge">只计量</span>{% endif %}
+      {% if p.override and p.override.action == "limit" %}<span class="badge warn">临时限额 ${{ "%.2f" | format(p.override.value) }}</span>{% endif %}
+    </div>
+    {% if p.limit %}
+    <div class="meter"><div class="{{ 'bad' if pct >= 100 else 'warn' if pct >= 80 else '' }}" style="width: {{ [pct, 100] | min }}%"></div></div>
+    {% endif %}
+    <dl>
+      <dt>最近 60 分钟</dt><dd>${{ "%.2f" | format(p.spent_1h) }}{% if p.limit %} / ${{ "%g" | format(p.limit) }}（{{ "%.0f" | format(pct) }}%）{% endif %}</dd>
+      {% if p.state == "queuing" %}
+      <dt>放行间隔</dt><dd>{% if p.step and p.step.gap %}每 {{ "%g" | format(p.step.gap) }} 秒一个{% elif p.step %}停 {{ p.step.off }} 秒 / 放 {{ p.step.on }} 秒{% endif %}</dd>
+      <dt>排队</dt><dd>{{ p.held }} 个{% if p.next_departure %} · 下一个 {{ p.next_departure | clock }}{% endif %}</dd>
+      {% if p.clear_at %}<dt>预计解除</dt><dd>{{ p.clear_at | clock }}（没有新花费的话）</dd>{% endif %}
+      {% endif %}
+      <dt>进行中</dt><dd>{{ p.in_flight }}</dd>
+      {% if p.wait_max_1h %}<dt>1 小时排队</dt><dd>中位 {{ p.wait_p50_1h }} 秒 · 最长 {{ p.wait_max_1h }} 秒</dd>{% endif %}
+      {% if p.last_error %}<dt>最近错误</dt><dd class="warn">{{ p.last_error.class }} × {{ p.last_error.count }} · {{ p.last_error.at | ago }}</dd>{% endif %}
+    </dl>
+  </div>
+{% endfor %}
+</div>
+
+<h2>计量</h2>
+<nav>
+{% for key, label in periods %}<a href="?period={{ key }}" class="{{ 'on' if key == period }}">{{ label }}</a>{% endfor %}
+</nav>
+<div class="wrap">
+<table>
+<tr><th>池</th><th class="n">请求</th><th class="n">失败</th><th class="n">折算费用</th><th class="n">平均上下文</th><th class="n">P90 上下文</th>
+    <th class="n">缓存命中</th><th class="n">输出 tokens</th><th class="n">排队次数</th><th class="n">排队中位 / P90</th><th class="n">排队超时</th></tr>
+{% for name, s in rows %}
+<tr>
+  <td><code>{{ name }}</code></td>
+  <td class="n">{{ s.requests }}</td>
+  <td class="n {{ 'warn' if s.errors }}" title="{{ s.error_classes | tojson }}">{{ s.errors }}</td>
+  <td class="n">${{ "%.2f" | format(s.eusd) }}</td>
+  <td class="n">{{ s.context.avg | tok }}</td>
+  <td class="n">{{ s.context.p90 | tok }}</td>
+  <td class="n">{{ s.cache_hit_rate | percent }}</td>
+  <td class="n">{{ s.tokens.output | tok }}</td>
+  <td class="n">{{ s.held.count }}</td>
+  <td class="n">{% if s.held.count %}{{ "%.0f" | format(s.held.p50) }} / {{ "%.0f" | format(s.held.p90) }} 秒{% else %}—{% endif %}</td>
+  <td class="n {{ 'bad' if s.held.timeouts }}">{{ s.held.timeouts }}</td>
+</tr>
+{% else %}
+<tr><td colspan="11" class="muted">这段时间没有请求</td></tr>
+{% endfor %}
+</table>
+</div>
+
+<h2>限速事件</h2>
+<div class="wrap">
+<table>
+<tr><th>时间</th><th>池</th><th>事件</th><th class="n">费用比例</th><th class="n">最近 60 分钟</th><th class="n">限额</th><th>说明</th></tr>
+{% for e in events %}
+<tr>
+  <td>{{ e.ts | when }}</td>
+  <td><code>{{ e.pool or "—" }}</code></td>
+  <td>{{ event_names.get(e.event, e.event) }}</td>
+  <td class="n">{% if e.ratio is not none %}{{ "%.2f" | format(e.ratio) }}×{% endif %}</td>
+  <td class="n">{% if e.spent_1h is not none %}${{ "%.2f" | format(e.spent_1h) }}{% endif %}</td>
+  <td class="n">{% if e.limit_value is not none %}${{ "%g" | format(e.limit_value) }}{% endif %}</td>
+  <td class="muted">{{ e.detail | describe }}</td>
+</tr>
+{% else %}
+<tr><td colspan="7" class="muted">最近 7 天没有事件</td></tr>
+{% endfor %}
+</table>
+</div>
+<p class="muted">JSON：<a href="status">status</a> · <a href="stats?period={{ period }}">stats</a> · <a href="events">events</a> · <a href="healthz">healthz</a></p>
+</body>
+</html>

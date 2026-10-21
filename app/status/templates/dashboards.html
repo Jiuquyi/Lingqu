@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9router Dashboard 入口</title>
+<style>
+  :root { --bg: #fff; --fg: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7; --accent: #0a66c2; --ok: #1a7f37; --warn: #9a6700; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161618; --fg: #f2f2f7; --muted: #a1a1a6; --line: #3a3a3c; --accent: #4c9aff; --ok: #3fb950; --warn: #d29922; } }
+  body { background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; max-width: 72rem; margin: 2rem auto; padding: 0 16px; }
+  h1 { font-size: 1.4rem; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: .5rem .4rem; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 500; }
+  .state-closed { color: var(--muted); } .state-temporary { color: var(--ok); } .state-persistent { color: var(--warn); }
+  form.inline { display: inline; }
+  button { font: inherit; padding: .25rem .7rem; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg); cursor: pointer; }
+  button.primary { border-color: var(--accent); color: var(--accent); }
+  input[type=password] { font: inherit; padding: .3rem .5rem; width: 20rem; max-width: 100%; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg); }
+  .error { color: #cf222e; }
+  .muted { color: var(--muted); }
+  .wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>9router Dashboard 入口</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+{% if not logged_in %}
+<form method="post">
+  <input type="hidden" name="action" value="login">
+  <p><input type="password" name="token" placeholder="管理员或本组的 opener token" autofocus>
+  <button class="primary" type="submit">登录</button></p>
+</form>
+<p class="muted">入口默认关闭；打开后只转发 Dashboard，不转发 LLM API。</p>
+{% else %}
+<div class="wrap">
+<table>
+<tr><th>9router</th><th>入口</th><th>状态</th><th>到期</th><th>最近操作</th><th></th></tr>
+{% for r in rows %}
+<tr>
+  <td>{{ r.upstream }}</td>
+  <td>{% set addr = (r.host or host) ~ (':' ~ r.port if r.port else '') %}
+      {% if r.open %}<a href="http://{{ addr }}/dashboard" target="_blank" rel="noopener">{{ addr }}</a>{% else %}{{ addr }}{% endif %}</td>
+  <td class="state-{{ r.state if r.open else 'closed' }}">{{ {'closed': '关闭', 'temporary': '临时打开', 'persistent': '保持打开'}[r.state if r.open else 'closed'] }}</td>
+  <td>{% if r.open and r.until %}{{ ((r.until - now) / 60) | round(0, 'ceil') | int }} 分钟后{% elif r.open %}手动关闭前一直打开{% else %}—{% endif %}</td>
+  <td class="muted">{{ r.opened_by or '—' }}</td>
+  <td>
+    <form class="inline" method="post"><input type="hidden" name="upstream" value="{{ r.upstream }}">
+      <button class="primary" name="action" value="open">{{ '延长' if r.open and r.state == 'temporary' else '打开' }} {{ (r.default_ttl / 60) | int }} 分钟</button>
+      {% if r.allow_persistent %}<button name="action" value="persist">保持打开</button>{% endif %}
+      {% if r.open %}<button name="action" value="close">关闭</button>{% endif %}
+    </form>
+  </td>
+</tr>
+{% endfor %}
+</table>
+</div>
+<form method="post" style="margin-top:1.5rem"><button name="action" value="logout">退出</button></form>
+<p class="muted">Codex / Claude 授权时，跳转后的 localhost 地址打不开是正常的：把浏览器地址栏里的完整地址粘回 9router 的授权窗口即可。</p>
+{% endif %}
+</body>
+</html>

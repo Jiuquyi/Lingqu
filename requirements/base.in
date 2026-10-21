@@ -1,0 +1,7 @@
+# Direct runtime dependencies
+Flask
+Flask-SQLAlchemy
+Flask-Migrate
+httpx
+PyYAML
+python-dotenv
