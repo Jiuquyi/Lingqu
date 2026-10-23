@@ -5,6 +5,9 @@ server:
   fail_mode: open                     # open | closed (DESIGN §4.7)
   proxy_port: 8090
   status_port: 8091
+  # Process-wide limits, checked before a request body is read (docs/RELIABILITY.md):
+  # max_active: 0                     # proxy requests in the process; 0 = worker threads - 8
+  # max_body_in_flight_mb: 256        # request bodies held in memory at once
 
 storage:
   dsn: "sqlite:////data/lingqu.db"
@@ -64,6 +67,7 @@ pools:
     # connections: ["<9router OAuth connection id>"]  # required if this provider has multiple accounts
     rules:
       # add session_aware: true once `flask replay --policy docs/replay/m3.yaml` shows it helps (DESIGN §4.5.1)
+      # reserve: shadow records what counting not-yet-reported input would have held (docs/RELIABILITY.md)
       - { kind: hourly_cap, limit: 20, on_exceed: hold, release: fifo }
       # Observe H(t) alongside the fixed cap for two weeks, then change mode to enforce.
       # short_limit must be measured for the subscription; omit it to disable the 5h eUSD constraint.
@@ -73,6 +77,7 @@ pools:
       # - { kind: cycle_cap, cycle_limit: 800, cycle_period: 7d, anchor: upstream_reset,
       #     on_exceed: reject, mode: shadow }
       - { kind: concurrency, max: 3, on_exceed: hold, mode: shadow }   # watch /status concurrency first
+      # - { kind: concurrency, max: 2, mode: shadow }   # shadow limits may repeat: compared side by side
   - name: team-a/codex
     kind: codex
     upstream: router-team-a

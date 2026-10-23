@@ -58,6 +58,8 @@ class Rule:
     h_max: float = 30.0
     short_limit: float | None = None
     quota_window: str = "weekly"
+    reserve: str = "off"          # hourly rules: "shadow" records what budget reservations would hold
+    reserve_quantile: float = 0.75
 
     @property
     def scope_key(self):
@@ -119,6 +121,8 @@ class Settings:
     fail_mode: str = "open"
     proxy_port: int = 8090
     status_port: int = 8091
+    max_active: int = 0                  # proxy requests in the process at once; 0: worker threads - 8
+    max_body_in_flight_mb: float = 256   # request bodies held in memory at once
     dsn: str = ""
     pricing: dict = field(default_factory=dict)
     max_hold: float = 150
@@ -246,6 +250,10 @@ def _server(ld, s, raw):
         ld.errors.append(f"server.fail_mode: {s.fail_mode!r} is not open or closed")
     s.proxy_port = int(ld.number("server.proxy_port", raw.get("proxy_port"), 8090))
     s.status_port = int(ld.number("server.status_port", raw.get("status_port"), 8091))
+    s.max_active = int(ld.number("server.max_active", raw.get("max_active"), 0, positive=False))
+    if s.max_active < 0:
+        ld.errors.append("server.max_active: must be 0 (worker threads - 8) or more")
+    s.max_body_in_flight_mb = ld.number("server.max_body_in_flight_mb", raw.get("max_body_in_flight_mb"), 256)
     if not s.admin_token:
         ld.warnings.append("server.admin_token is empty: admin endpoints are disabled")
 
@@ -303,6 +311,8 @@ def _steps(ld, name, raw, default, keys):
         ld.errors.append(f"{name}: must be a non-empty list of steps")
         return list(default)
     for i, item in enumerate(raw):
+        if isinstance(item, dict):  # YAML 1.1 reads the keys `on` / `off` as true / false
+            item = {({True: "on", False: "off"}.get(k, k) if isinstance(k, bool) else k): v for k, v in item.items()}
         if not isinstance(item, dict) or any(k not in item for k in keys):
             ld.errors.append(f"{name}[{i}]: needs {', '.join(keys)}")
             return list(default)
@@ -428,6 +438,17 @@ def _rule(ld, pool, i, raw):
     r = Rule(kind=kind, on_exceed=on_exceed, release=release,
              shadow=mode == "shadow" or on_exceed == "shadow", scope_model=scope.get("model"),
              session_aware=aware)
+    if kind in ("hourly_cap", "hourly_budget"):
+        r.reserve = raw.get("reserve", "off")
+        if r.reserve == "enforce":
+            ld.errors.append(f"{where}: reserve enforce is not implemented; observe it with reserve: shadow")
+        elif r.reserve not in ("off", "shadow"):
+            ld.errors.append(f"{where}: reserve {r.reserve!r} is not off or shadow")
+        r.reserve_quantile = ld.number(f"{where}: reserve_quantile", raw.get("reserve_quantile"), 0.75)
+        if not 0 < r.reserve_quantile <= 1:
+            ld.errors.append(f"{where}: reserve_quantile must be in (0, 1]")
+    elif "reserve" in raw:
+        ld.errors.append(f"{where}: reserve applies to hourly_cap and hourly_budget only")
     if kind == "hourly_cap":
         r.limit = float(ld.number(f"{where}: limit", raw.get("limit"), 0) or 0)
         if not raw.get("limit"):
@@ -529,9 +550,11 @@ def _pools(ld, s, raw):
         if not isinstance(keys, list) or any(not isinstance(k, str) or not k for k in keys):
             ld.errors.append(f"pool {name}: keys must be a list of non-empty strings")
             keys = []
-        rule_ids = [(r.kind, r.scope_key, r.shadow) for r in rules]
+        # Shadow count rules may repeat with different limits, to compare them side by side.
+        rule_ids = [(r.kind, r.scope_key, r.shadow, r.max if r.shadow and r.kind in ("concurrency", "rpm") else None)
+                    for r in rules]
         if len(rule_ids) != len(set(rule_ids)):
-            ld.errors.append(f"pool {name}: duplicate rule kind, model scope and mode")
+            ld.errors.append(f"pool {name}: duplicate rule kind, model scope, mode (and shadow limit)")
         s.pools[name] = Pool(name=name, kind=kind, upstream=p.get("upstream"),
                              keys=[k for k in keys if k], match=list(match), rules=rules, connections=connections, priority=priority)
         for k in keys:

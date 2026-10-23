@@ -6,6 +6,7 @@ class Ledger(db.Model):
     """One row per request."""
     __tablename__ = "ledger"
     id = db.Column(db.Integer, primary_key=True)
+    request_id = db.Column(db.String(32), index=True, unique=True)  # written once; null on rows before 0005
     ts = db.Column(db.Float, index=True, nullable=False)          # request arrival
     pool = db.Column(db.String(128), index=True, nullable=False)
     key_ref = db.Column(db.String(16))                             # last characters of the lq- key
@@ -28,6 +29,7 @@ class Ledger(db.Model):
     usage_source = db.Column(db.String(16))                        # upstream | estimated | none
     eusd = db.Column(db.Float, default=0.0)
     eusd_input = db.Column(db.Float, default=0.0)                  # part counted at message_start
+    eusd_pending = db.Column(db.Float, default=0.0)                # observed but not taken by the gate yet
     counted_at = db.Column(db.Float)                               # when eusd_input entered the window
     accounted_at = db.Column(db.Float)                             # exact final charge time, M4 checkpoint recovery
     price_ref = db.Column(db.String(160))
@@ -36,6 +38,21 @@ class Ledger(db.Model):
     duration_ms = db.Column(db.Integer)
     gate_result = db.Column(db.String(32))
     cache_state = db.Column(db.String(8))                          # warm | cold | none, from the session's last start
+
+
+class MeterEvent(db.Model):
+    """A charge observed before its request settled (the input side at message_start). Recovery
+    uses the ones without a ledger row: requests that were still running when the process died."""
+    __tablename__ = "meter_events"
+    __table_args__ = (db.UniqueConstraint("request_id", "seq", name="uq_meter_events_request_seq"),)
+    id = db.Column(db.Integer, primary_key=True)
+    request_id = db.Column(db.String(32), nullable=False)
+    seq = db.Column(db.Integer, nullable=False)
+    ts = db.Column(db.Float, index=True, nullable=False)          # when it entered the window
+    pool = db.Column(db.String(128), nullable=False)
+    model = db.Column(db.String(128))                              # the request's model
+    user_ref = db.Column(db.String(128))
+    amount = db.Column(db.Float, nullable=False)
 
 
 class GateEvent(db.Model):

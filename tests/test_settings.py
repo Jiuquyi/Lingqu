@@ -34,6 +34,10 @@ class SettingsTestCase(unittest.TestCase):
         _, errors, _ = settings_mod.load(text=bad)
         self.assertTrue(any("increase" in e for e in errors))
 
+    def test_phase_steps_with_yaml_on_off_keys(self):
+        s = load(BASE + "\nphase:\n  - { at: 1.0, off: 45, on: 60 }\n  - { at: 1.5, off: 100, on: 45 }\n")
+        self.assertEqual(s.phase, [(1.0, 45.0, 60.0), (1.5, 100.0, 45.0)])
+
     def test_long_gap_warns(self):
         _, errors, warnings = settings_mod.load(text=BASE + "fifo:\n  - { at: 1.0, gap: 40 }\n")
         self.assertEqual(errors, [])

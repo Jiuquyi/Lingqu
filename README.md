@@ -2,7 +2,7 @@
 
 架在 New API 和 9router 之间的流控代理：把每次请求的 token 按价格表折算成等价美元（eUSD），按"池"（一个订阅账户的一类上游）分别核算；超过每小时限额时，请求在灵渠里排队、按间隔匀速放出，而不是报错。设计见 [docs/DESIGN.md](docs/DESIGN.md)。
 
-当前实现覆盖里程碑 M1 ～ M5（DESIGN §14）。M5 的配置、升级和多实例边界见 [docs/M5.md](docs/M5.md)：
+当前实现覆盖里程碑 M1 ～ M5（DESIGN §14）。M5 的配置、升级和多实例边界见 [docs/M5.md](docs/M5.md)。计量生命周期、幂等、恢复与 RPO、进程容量和 shadow 观察项见 [docs/RELIABILITY.md](docs/RELIABILITY.md)（0.9.0，迁移 `0005`）：
 
 | 已实现 | 推后 |
 |---|---|
@@ -14,6 +14,7 @@
 | M4：9router 额度采集、响应头补充；`hourly_budget`、168 小时权重、`cycle_cap`；90% 最低预算 / 98% 拒绝；预算与额度快照、长周期恢复（[配置及边界](docs/M4.md)） | |
 | 账本（含每个请求的 `cache_state`）、限速事件、重启恢复（窗口和会话时钟）、热重载、管理员覆盖、webhook 告警 | |
 | 错误分类（含流里的错误、连不上 9router）；`account_auth` / `router_unreachable` 连续出现时告警，恢复时再推一条 | |
+| 0.9.0：客户端任意位置断开都保留已读到的 usage；计费失败照写账本并按原 key 补偿；账本行和计量事件幂等写入；运行中请求的输入可在崩溃后恢复；恢复未完成即不 ready；Redis 丢状态时拒绝准入并由单个实例重建；进程级并发 / 请求体上限；预算预留和多档并发的 shadow 对比 | `reserve: enforce` |
 | `/status`、`/stats`、`/events`、`/healthz`；状态端口 `/` 的只读状态页（池、计量、限速事件） | |
 | M5：Jinja2 + 本地 Bootstrap 控制台、9router 库存/健康/额度同步与对账、模型优先级/歧义/回退、Redis 全局准入、可信用户级限流 | |
 | 9router Dashboard 入口：关闭 / 临时 / 保持打开、opener token、开关页、审计 | |
@@ -34,7 +35,7 @@ export FLASK_APP=lingqu.py LINGQU_CONFIG=$PWD/lingqu.yaml
 - 未配置 Redis 时，worker 和副本数必须是 1，k8s 用 `replicas: 1` + `strategy: Recreate`。启用 Redis 后可用 `LINGQU_WORKERS` 或多个副本，需共享 PostgreSQL、同一份配置与 `SECRET_KEY`；[compose.redis.yaml](compose.redis.yaml) 提供双副本部署模板。退出宽限时间均为 600 秒。
 - `SIGTERM`：挂起中的请求立即返回 503，正在进行的流跑完（最多 600 秒），退出前写完账本。
 
-控制台：状态端口 `/console`，用管理员 token 登录。共享模型 key 未命中默认拒绝；旧配置如需继续仅计量 unknown 池，必须显式设置 `unmatched: unknown`。升级先运行 `flask deploy`，迁移到 `0004`。
+控制台：状态端口 `/console`，用管理员 token 登录。共享模型 key 未命中默认拒绝；旧配置如需继续仅计量 unknown 池，必须显式设置 `unmatched: unknown`。升级先运行 `flask deploy`，迁移到 `0005`。
 
 ## 测试
 
@@ -42,7 +43,7 @@ export FLASK_APP=lingqu.py LINGQU_CONFIG=$PWD/lingqu.yaml
 FLASK_APP=lingqu.py LINGQU_CONFIG=lingqu.example.yaml .venv/bin/flask test     # 或 python -m unittest discover tests
 ```
 
-闸门用假时钟测；代理用一个本地假 9router 端到端测（透传、计量、错误分类、端口隔离、Dashboard 入口）。
+闸门用假时钟测；代理用一个本地假 9router 端到端测（透传、计量、错误分类、端口隔离、Dashboard 入口）。`tests/test_reliability.py` 覆盖断连、计费失败、账本写失败、恢复、容量和 shadow 对比。Redis 集成测试需要 `redis-server` 在 `PATH` 里，否则跳过。
 
 ## 回放
 

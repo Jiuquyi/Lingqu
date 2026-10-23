@@ -109,7 +109,10 @@ def status_json():
                     "stale": r.pricing.stale(), "last_error": r.pricing.last_error or None,
                     "unpriced_models": sorted(r.pricing.unpriced)},
         "health": {"gate_errors_1h": r.gate.errors_1h(), "ledger_lag_sec": r.ledger.lag(),
-                   "ledger_dropped": r.ledger.dropped, "held": r.gate.held_total()},
+                   "ledger_dropped": r.ledger.dropped, "held": r.gate.held_total(), "recovery": r.recovery},
+        "ledger": r.ledger.metrics(),
+        "capacity": r.capacity.status(),
+        "metering": r.metering_status(),
         "pools": pools,
         "dashboards": {n: {k: v for k, v in st.items()} for n, st in r.exposure.snapshot().items()},
     })

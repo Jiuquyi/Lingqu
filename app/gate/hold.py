@@ -23,10 +23,12 @@ from .fifo import gap as fifo_gap, step_for
 from .budget import Budgets
 from .limits import Counts
 from .phase import Phase
+from .reserve import Reservations
 from .sessions import CACHE_MARGIN, COLD, NONE, SessionClock
 from .window import BUCKET, Counters
 
 WAITS_KEPT = 3600  # seconds of hold times kept for the p50 / max in /status
+APPLIED_KEPT = 900  # seconds a charge key is remembered: a retry within them is not counted twice
 
 
 @dataclass
@@ -81,10 +83,13 @@ class Gate:
         self.on_event = on_event or (lambda **kw: None)
         self.pools = {}
         self.closing = False
+        self.ready = True   # False until the windows are rebuilt (Runtime.recover): admitting then would undercount
         self.errors = collections.deque()  # times of internal errors
         self.seq = itertools.count(1)
         self.sessions = SessionClock()
         self.budgets = Budgets(settings, self.counters)
+        self.applied = collections.OrderedDict()  # charge key -> (taken at, charged at)
+        self.reservations = Reservations()
 
     # ------------------------------------------------------------ configuration
 
@@ -130,17 +135,31 @@ class Gate:
                 out.append(r.scope_key)
         return out
 
-    def charge(self, pool, model, amount, t=None, history=True, user=""):
+    def charge(self, pool, model, amount, t=None, history=True, user="", key=None):
+        """Add amount to the pool's (and the user's) windows and history; returns the charge time.
+        key: "<request id>:<seq>" of a metered charge. A key already taken returns its first
+        charge time and adds nothing, so retrying a charge whose commit went unconfirmed is safe."""
         with self.lock:
-            now = self.clock()
-            charged_at = now if t is None else t
-            targets = [pool] + (["@user/" + user] if user else [])
             with self.counters.lock:
+                # Read under the counters lock: a checkpoint sees the whole charge or none of it.
+                now = self.clock()
+                if key is not None:
+                    while self.applied and next(iter(self.applied.values()))[0] < now - APPLIED_KEPT:
+                        self.applied.popitem(last=False)
+                    if key in self.applied:
+                        return self.applied[key][1]
+                charged_at = now if t is None else t
+                targets = [pool] + (["@user/" + user] if user else [])
                 for target in targets:
                     self.counters.add(target, self.scopes(target, model), charged_at, amount, now)
                     if history:
                         self.counters.add_history(target, model, charged_at, amount, now)
                     self.state(target).cond.notify_all()
+                if key is not None:
+                    self.applied[key] = (now, charged_at)
+                    rid, _, seq = key.partition(":")
+                    if seq == "1":   # the input side: what the request's reservation stood for
+                        self.reservations.settle(pool, rid, amount, now)
             return charged_at
 
     def update_quota(self, pool, connection, windows, source="api", persist=None):
@@ -296,6 +315,8 @@ class Gate:
         s = self.settings
         if self.closing:
             return "reject", None, "lingqu is shutting down"
+        if not self.ready:
+            return "reject", None, "lingqu is rebuilding its windows from the ledger"
         reason = self._hard_reason(t.pool, model, now)
         if reason:
             return "reject", None, reason
@@ -434,11 +455,12 @@ class Gate:
                             u.result, u.message = "rejected", msg
                         else:
                             u.result = "released_by_cap" if verdict == "cap" else ("held" if queued else "pass")
-                            u.shadow = self._would_hold(st, u, now)
+                            u.shadow, labels = self._would_hold(st, u, now)
                             if u.shadow:
                                 if u.result == "pass":
                                     u.result = "shadow_would_hold"
-                                st.shadow_hits.append((now, u.shadow))
+                                st.shadow_hits.extend((now, u.shadow, label) for label in labels or [u.shadow])
+                            self._reserve(st, u, now)
                             st.last_departure = now
                             self.sessions.started(u.pool, u.session, now)
                             u.count_scopes = sorted({r.scope_key for r in self._count_rules(u.pool, u.model)} | {"*", "actual=" + u.model})
@@ -463,13 +485,36 @@ class Gate:
                 self.state(t.pool).cond.wait(max(0.01, min(wake or now + 0.25, now + 0.25) - now))
 
     def _would_hold(self, st, t, now):
-        """The kind of the shadow rule that would have held t, or ''."""
-        _, shadow, _ = self._count_block(st, self._count_rules(t.pool, t.model), now)
+        """(kind of the first shadow rule that would have held t or '', a label for every shadow
+        count rule that would have: "concurrency<=2", "rpm<=30 model=*opus*"), so shadow rules
+        of one kind with different limits can be compared side by side."""
+        rules = self._count_rules(t.pool, t.model)
+        labels = []
+        for r in rules:
+            if r.shadow and self._count_block(st, [r], now)[1] is not None:
+                labels.append(f"{r.kind}<={r.max}" + (f" {r.scope_key}" if r.scope_model else ""))
+        _, shadow, _ = self._count_block(st, rules, now)
         if shadow is not None:
-            return shadow.kind
+            return shadow.kind, labels
         if self._hard_reason(t.pool, t.model, now, shadow=True):
-            return "cycle_or_quota"
-        return self._shadow_money(t.pool, t.model, now)
+            return "cycle_or_quota", labels
+        return self._shadow_money(t.pool, t.model, now), labels
+
+    def _reserve(self, st, t, now):
+        """Shadow budget reservation for a departing pool request (gate/reserve.py)."""
+        if t.pool.startswith("@user/"):
+            return
+        ratio, rule, limit, spent = self.money(t.pool, t.model, now)
+        if rule is None or rule.reserve != "shadow" or not limit:
+            return
+        r = self.reservations
+        estimate = r.estimate(t.pool, t.cache, rule.reserve_quantile)
+        if estimate is None:
+            return
+        if ratio < 1 <= (spent + r.reserved(t.pool, now) + estimate) / limit:
+            r.held_back(t.pool, now)
+            st.shadow_hits.append((now, "reserve", f"reserve q{rule.reserve_quantile:g}"))
+        r.reserve(t.pool, t.id, estimate, now)
 
     def finish(self, t):
         with self.lock:
@@ -477,6 +522,7 @@ class Gate:
                 st = self.state(u.pool)
                 st.counts.finish(u.count_scopes)
                 u.count_scopes = []
+                self.reservations.release(u.pool, u.id)
                 st.cond.notify_all()
 
     def cancel(self, t):
@@ -583,8 +629,14 @@ class Gate:
                            for r in self.settings.pool_config(pool).rules if r.kind == "cycle_cap"]
                            if self.settings.pool_config(pool) else [],
                 "brake": self.budgets.emergency(pool, now) if self.settings.pool_config(pool) else "normal",
+                "reservation": self._reservation_status(pool, now),
                 "reject_reason": hard_reason or None,
             }
+
+    def _reservation_status(self, pool, now):
+        p = self.settings.pool_config(pool)
+        rule = next((r for r in (p.rules if p else []) if r.reserve == "shadow"), None)
+        return self.reservations.status(pool, now, rule.reserve_quantile) if rule else None
 
     def rule_status(self, pool, st, now):
         p = self.settings.pool_config(pool)
@@ -613,11 +665,12 @@ class Gate:
         rules = [r for r in (p.rules if p else []) if r.kind == "concurrency" and r.scope_model is None]
         while st.shadow_hits and st.shadow_hits[0][0] < now - 3600:
             st.shadow_hits.popleft()
-        would = collections.Counter(kind for _, kind in st.shadow_hits)
+        would = collections.Counter(hit[1] for hit in st.shadow_hits if hit[1] != "reserve")
+        by_rule = collections.Counter(hit[-1] for hit in st.shadow_hits if hit[1] != "reserve")
         return {"in_flight": st.counts.in_flight["*"], "peak_1h": st.counts.peak("*", now),
                 "max": min((r.max for r in rules if not r.shadow), default=None),
                 "shadow_max": min((r.max for r in rules if r.shadow), default=None),
-                "would_hold_1h": dict(would)}
+                "would_hold_1h": dict(would), "would_hold_by_rule_1h": dict(by_rule)}
 
     def held_total(self):
         with self.lock:

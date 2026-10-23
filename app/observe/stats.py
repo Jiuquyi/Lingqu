@@ -48,7 +48,9 @@ def summarize(rows):
     eusd = sum(r.eusd or 0 for r in rows)
     cold = [r for r in rows if r.cache_state == "cold"]
     return {
-        "requests": len(rows), "errors": sum(errors.values()), "error_classes": dict(errors),
+        # A client hanging up mid-stream is not an error of the request; it stays in error_classes.
+        "requests": len(rows), "errors": sum(n for c, n in errors.items() if c != "client_closed"),
+        "error_classes": dict(errors),
         "tokens": {"input": sum(r.input_tokens for r in rows), "cache_read": cache_read,
                    "cache_write": cache_write, "output": sum(r.output_tokens for r in rows)},
         "eusd": round(eusd, 4),

@@ -416,7 +416,8 @@ class ConcurrencyTestCase(unittest.TestCase):
         h.gate.finish(t2)
         c = h.gate.pool_status("a/codex")["concurrency"]
         self.assertEqual(c, {"in_flight": 0, "peak_1h": 2, "max": None, "shadow_max": 1,
-                             "would_hold_1h": {"concurrency": 1}})
+                             "would_hold_1h": {"concurrency": 1},
+                             "would_hold_by_rule_1h": {"concurrency<=1": 1}})
         h.clock.advance(3601)
         c = h.gate.pool_status("a/codex")["concurrency"]
         self.assertEqual((c["peak_1h"], c["would_hold_1h"]), (0, {}))

@@ -7,17 +7,25 @@ subscription gateways described in DESIGN, rather than a high-throughput Redis c
 import collections
 import hashlib
 import json
+import logging
 import threading
 import time
+import uuid
 from dataclasses import asdict
 
 from .hold import Gate, Ticket
 from .phase import Phase
 from .window import SpendHistory, Window
 
+log = logging.getLogger("lingqu")
+
 
 class SharedStateError(RuntimeError):
-    pass
+    """The transaction did not take effect."""
+
+
+class CommitUnconfirmed(SharedStateError):
+    """The commit was sent but its answer was lost: it may or may not have taken effect."""
 
 
 def signature(settings):
@@ -26,11 +34,20 @@ def signature(settings):
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
+def percentile(values, q):
+    values = sorted(values)
+    return values[min(len(values) - 1, int(q * len(values)))] if values else None
+
+
+SAMPLES_KEPT = 2000  # transactions kept for the lock and state-size figures in /healthz
+
+
 class SharedLock:
     """RLock/Condition interface with Redis fencing, including full release while waiting."""
     COMMIT = """
     if redis.call('get', KEYS[1]) ~= ARGV[1] then return 0 end
     redis.call('set', KEYS[2], ARGV[2])
+    redis.call('set', KEYS[3], ARGV[3])
     return 1
     """
 
@@ -38,6 +55,19 @@ class SharedLock:
         self.gate = gate
         self.local = threading.RLock()
         self.context = threading.local()
+        self.samples = collections.deque(maxlen=SAMPLES_KEPT)  # (t, wait s, hold s, state bytes)
+
+    def metrics(self):
+        """Lock wait and hold times and the state size: what decides whether Redis needs the
+        hot / history split (DESIGN §11.2) before more instances are added."""
+        samples = list(self.samples)
+        now = time.time()
+        waits, holds = [x[1] for x in samples], [x[2] for x in samples]
+        ms = lambda v: round(v * 1000, 2) if v is not None else None
+        return {"transactions": len(samples), "per_sec_60s": round(sum(1 for x in samples if x[0] > now - 60) / 60, 2),
+                "wait_ms": {q: ms(percentile(waits, p)) for q, p in (("p50", .5), ("p95", .95), ("p99", .99))},
+                "hold_ms": {q: ms(percentile(holds, p)) for q, p in (("p50", .5), ("p95", .95), ("p99", .99))},
+                "state_bytes": samples[-1][3] if samples else None}
 
     def acquire(self, blocking=True, timeout=-1):
         if not self.local.acquire(blocking, timeout):
@@ -46,17 +76,24 @@ class SharedLock:
         if depth == 0:
             lock = self.gate.redis.lock(self.gate.prefix + ':lock', timeout=15, blocking_timeout=5)
             try:
+                started = time.time()
                 if not lock.acquire(blocking=blocking):
                     raise SharedStateError("shared gate is busy")
                 self.context.remote = lock
+                self.context.timing = (started, time.time())
                 raw = self.gate.redis.get(self.gate.prefix + ':state')
+                self.context.size = len(raw or b"")
                 if raw:
                     data = json.loads(raw)
                     if data.get("schema") != 1:
                         raise SharedStateError("unsupported shared state schema")
-                    if data['signature'] != signature(self.gate.settings) and not getattr(self.context, 'reloading', False):
+                    if data['signature'] != self.gate.signature() and not getattr(self.context, 'reloading', False):
                         raise SharedStateError("cluster configuration differs; reload every instance")
                     self.gate.decode(data)
+                elif self.gate.epoch is not None and not getattr(self.context, 'restoring', False):
+                    # This instance has seen the state, so Redis lost it: an empty one would start
+                    # every window and budget afresh. Refuse until one instance rebuilds it.
+                    raise SharedStateError("shared state lost; waiting for it to be rebuilt from the ledger")
                 self.gate.reap()
             except Exception:
                 try:
@@ -75,10 +112,24 @@ class SharedLock:
             if depth == 0:
                 lock = self.context.remote
                 payload = json.dumps(self.gate.encode(), separators=(',', ':'), allow_nan=False)
-                if not self.gate.redis.eval(self.COMMIT, 2, self.gate.prefix + ':lock',
-                                            self.gate.prefix + ':state', lock.local.token, payload):
+                try:
+                    committed = self.gate.redis.eval(self.COMMIT, 3, self.gate.prefix + ':lock',
+                                                     self.gate.prefix + ':state', self.gate.prefix + ':signature',
+                                                     lock.local.token, payload, self.gate.signature())
+                except Exception as e:
+                    try:  # best effort: the others need not wait for the lock to expire
+                        lock.release()
+                    except Exception:
+                        pass
+                    raise CommitUnconfirmed("shared gate commit unconfirmed") from e
+                if not committed:
                     raise SharedStateError("shared gate transaction lease expired")
-                lock.release()
+                started, acquired = self.context.timing
+                self.samples.append((acquired, acquired - started, time.time() - acquired, len(payload)))
+                try:
+                    lock.release()
+                except Exception as e:  # committed already; the lock expires on its own
+                    log.warning("releasing the shared gate lock failed: %s", e)
         finally:
             self.local.release()
 
@@ -113,7 +164,65 @@ class RedisGate(Gate):
         self.sequence = 0
         self.active = {}
         self.registry = {}  # identity must survive a Condition releasing and reacquiring its lock
+        self.epoch = None   # id of the shared state this instance has seen; set when it is built
+        self._signature = (None, None)
         self.lock = SharedLock(self)
+
+    def signature(self):
+        """The settings fingerprint, computed once per settings object."""
+        if self._signature[0] is not self.settings:
+            self._signature = (self.settings, signature(self.settings))
+        return self._signature[1]
+
+    def state_missing(self):
+        return not self.redis.exists(self.prefix + ':state')
+
+    def bootstrap(self, restore):
+        """Make sure the shared state exists, building it from the database when it does not: on
+        a cluster's first start, or after Redis lost it. One instance builds it under a Redis
+        lock; the others stay not ready until it is there. restore(gate) replays the database
+        into this gate inside the building transaction. Returns "present", "built" or "rebuilt"
+        (the state was lost)."""
+        if not self.state_missing():
+            with self.lock:  # learn the epoch, so a later loss is told apart from a first start
+                pass
+            return "present"
+        lost = self.epoch is not None
+        guard = self.redis.lock(self.prefix + ':restore', timeout=600, blocking_timeout=0)
+        if not guard.acquire(blocking=False):
+            raise SharedStateError("another instance is rebuilding the shared state")
+        try:
+            if not self.state_missing():
+                return "present"
+            self.lock.context.restoring = True
+            try:
+                with self.lock:
+                    self.clear()
+                    self.epoch = uuid.uuid4().hex
+                    restore(self)
+            finally:
+                self.lock.context.restoring = False
+            return "rebuilt" if lost else "built"
+        finally:
+            try:
+                guard.release()
+            except Exception as e:
+                log.warning("releasing the shared-state rebuild lock failed: %s", e)
+
+    def clear(self):
+        """Forget the local copy of the shared state (PoolState objects stay: threads hold them)."""
+        for st in self.pools.values():
+            st.queue.clear()
+            st.counts = type(st.counts)()
+            st.last_departure, st.phase, st.override = None, None, None
+            st.waits.clear()
+            st.shadow_hits.clear()
+        self.counters.windows.clear()
+        self.counters.history.clear()
+        self.sessions.last.clear()
+        self.budgets.quotas, self.budgets.calibration, self.budgets.cache = {}, {}, {}
+        self.active, self.applied = {}, collections.OrderedDict()
+        self.reservations.load({})
 
     def _prepare(self, ticket):
         self.sequence += 1
@@ -172,11 +281,13 @@ class RedisGate(Gate):
 
     def reload(self, settings):
         previous = self.settings
+        self._signature = (None, None)   # the same object may come back changed
         self.lock.context.reloading = True
         try:
             super().reload(settings)
         except Exception:
             self.settings = previous
+            self._signature = (None, None)
             self.budgets.configure(previous)
             raise
         finally:
@@ -203,14 +314,16 @@ class RedisGate(Gate):
         for w in self.counters.windows.values():
             w.total(now)
         b = self.budgets
-        return {'schema': 1, 'signature': signature(self.settings), 'states': states,
+        return {'schema': 1, 'signature': self.signature(), 'epoch': self.epoch, 'states': states,
             'windows': [[*k, w.dump()] for k, w in self.counters.windows.items()],
             'history': [[*k, h.amounts] for k, h in self.counters.history.items()],
             'sessions': [[*k, t] for k, t in self.sessions.last.items()],
             'quotas': [[*k, v] for k, v in b.quotas.items()],
             'calibration': [[*k, v] for k, v in b.calibration.items()],
             'revision': b.revision, 'budget_cache': [[*k, v] for k, v in b.cache.items()],
-            'active': self.active, 'sequence': self.sequence}
+            'active': self.active, 'sequence': self.sequence,
+            'applied': [[k, *v] for k, v in self.applied.items()],
+            'reservations': self.reservations.dump()}
 
     @staticmethod
     def ticket_data(ticket):
@@ -219,6 +332,7 @@ class RedisGate(Gate):
     def decode(self, data):
         # Keep PoolState and local Ticket identities: waiting threads retain references to them.
         self.sequence = data["sequence"]
+        self.epoch = data.get("epoch") or self.epoch
         for name, raw in data['states'].items():
             st = self.state(name)
             st.queue.clear()
@@ -267,11 +381,21 @@ class RedisGate(Gate):
             sig[4] = tuple(tuple(v) for v in sig[4])
             b.cache[p, scope] = (tuple(sig), row)
         self.active = data['active']
+        self.applied = collections.OrderedDict((k, (taken, at)) for k, taken, at in data.get('applied', []))
+        self.reservations.load(data.get('reservations'))
 
     def health(self):
+        """Redis reachable, the shared state there and built from this instance's config; no
+        transaction, so a health check neither waits for the gate lock nor rewrites the state."""
         try:
-            with self.lock:
-                pass
-            return {'ok': True, 'backend': 'redis'}
+            self.redis.ping()
+            missing = self.state_missing()
+            sig = self.redis.get(self.prefix + ':signature')
         except Exception:
-            return {'ok': False, 'backend': 'redis', 'error': 'shared admission unavailable or configuration differs'}
+            return {'ok': False, 'backend': 'redis', 'error': 'shared admission unavailable'}
+        out = {'ok': True, 'backend': 'redis', 'epoch': self.epoch, 'lock': self.lock.metrics()}
+        if missing:
+            out.update(ok=False, error='shared state missing; it is rebuilt from the ledger')
+        elif sig is not None and sig.decode() != self.signature():
+            out.update(ok=False, error='cluster configuration differs; reload every instance')
+        return out

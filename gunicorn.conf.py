@@ -21,6 +21,9 @@ def _binds():
         raise SystemExit("lingqu: invalid config %s:\n  " % path + "\n  ".join(errors))
     if workers > 1 and not s.redis:
         raise SystemExit("LINGQU_WORKERS > 1 requires redis configuration")
+    if s.max_active and s.max_active > threads - 2:
+        raise SystemExit(f"server.max_active {s.max_active} leaves fewer than 2 of {threads} threads "
+                         "for health checks and admin; lower it or raise LINGQU_THREADS")
     host = os.environ.get("LINGQU_BIND_HOST", "0.0.0.0")
     return [f"{host}:{p}" for p in [s.proxy_port, s.status_port] + s.dashboard_ports()]
 
