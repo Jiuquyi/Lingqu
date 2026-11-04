@@ -23,17 +23,17 @@
 | Redis 丢状态 | 共享状态带 epoch；见过 epoch 的实例发现状态缺失就拒绝准入；单个实例拿锁从数据库重建（`built` / `rebuilt`） | `SharedRecoveryTest`（真实 Redis） |
 | 全局容量保护 | `server.max_active`（默认线程数 − 8）、`max_body_in_flight_mb`（默认 256），在读请求体之前判断；gunicorn 启动检查留够状态端口的线程 | gunicorn 实测：第 5 个请求 1 毫秒内 503，`/healthz` 1 毫秒内 200 |
 | 基础指标 | `/healthz`：`ledger`、`capacity`、`recovery`；`/status`：`metering`（pending、补偿计数、按池和协议的 usage 来源与默认价格占比） | — |
-| 配置生成链（MachGate） | `machgate.py`：新配置先交给运行中的灵渠校验，需要重启才能生效的改动直接拒绝；旧配置存到 `lingqu-config-previous`；reload 被拒时把旧 Secret 放回；新增 `lingqu-rollback`（固定，cron 不覆盖）和 `lingqu-unpin`；`check` 会报告固定状态 | 对生产 pod 只读校验：现有配置通过，坏配置、改端口都被拒绝；读写路径用桩测试。新键都不设时，渲染结果与原版逐字节一致；cron 入口照常运行，`config unchanged` |
+| 配置生成链（部署方） | 部署方的生成脚本：新配置先交给运行中的灵渠校验，需要重启才能生效的改动直接拒绝；保留上一份配置；reload 被拒时放回旧配置；可以回滚并固定到上一份（定时同步不覆盖），也可以解除固定；`check` 会报告固定状态 | 对生产 pod 只读校验：现有配置通过，坏配置、改端口都被拒绝；读写路径用桩测试。新开关都不设时，渲染结果与原版逐字节一致；定时同步照常运行，`config unchanged` |
 
 ## 第三阶段：观察一至两周（需要先上线新镜像）
 
-| 项 | 实现 | 接入 MachGate | 还差 |
+| 项 | 实现 | 接入部署方 | 还差 |
 |---|---|---|---|
-| 额度采集 | M4 已有 | `[lingqu] quota = true`：用 `ROUTER_*_PASSWORD` 生成 `upstreams[].quota` | 上线后看 `/status` 里额度的新鲜度 |
-| 并发 shadow | 同一个池可以并排配多档；`would_hold_by_rule_1h` 分档计数 | `[lingqu] shadow_concurrency = [2, 3]` | 观察 |
-| 预算预留 shadow | `reserve: shadow`：按池和缓存状态的分位数估计输入，`message_start` 时结算，记录误差和"会挡住"的次数 | `[lingqu] reserve = "shadow"` | 观察；`reserve: enforce` 目前拒绝加载 |
+| 额度采集 | M4 已有 | 打开开关后用各 9router 的管理密码生成 `upstreams[].quota` | 上线后看 `/status` 里额度的新鲜度 |
+| 并发 shadow | 同一个池可以并排配多档；`would_hold_by_rule_1h` 分档计数 | 生成并排的两档并发 shadow（2、3） | 观察 |
+| 预算预留 shadow | `reserve: shadow`：按池和缓存状态的分位数估计输入，`message_start` 时结算，记录误差和"会挡住"的次数 | 生成 `reserve: shadow` | 观察；`reserve: enforce` 目前拒绝加载 |
 
-这三项在 `groups.toml` 里都没有打开，等新镜像上线后再开（见 MachGate `docs/lingqu-migration.md` 第 9 节）。观察期的结论（等待、缓存成本和额度消耗是否一起改善）需要真实流量，本次没有得出。
+这三项在部署方的配置里都没有打开，等新镜像上线后再开（上线步骤由部署方自己的文档说明）。观察期的结论（等待、缓存成本和额度消耗是否一起改善）需要真实流量，本次没有得出。
 
 ## 第四阶段：有明确容量需求后
 
