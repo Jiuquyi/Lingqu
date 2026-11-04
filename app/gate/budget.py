@@ -35,6 +35,15 @@ def weights_remaining(rule, weights, now, end):
     return current, total
 
 
+# Routers recompute reset times on every read, so one cycle's reset_at drifts by up to a second.
+RESET_JITTER = 120
+CALIBRATION_HISTORY = 48
+
+
+def same_cycle(a, b):
+    return a == b if a is None or b is None else abs(a - b) < RESET_JITTER
+
+
 class Budgets:
     def __init__(self, settings, counters, on_snapshot=None):
         self.settings, self.counters = settings, counters
@@ -42,7 +51,7 @@ class Budgets:
         self.quotas = {}  # (pool, connection, window) -> normalized observation
         self.cache = {}
         self.revision = {}
-        self.calibration = {}
+        self.calibration = {}  # (account, window) -> the current cycle's eUSD per percent, and past cycles
         self.trigger = "startup"
 
     def configure(self, settings, trigger="reload"):
@@ -63,20 +72,13 @@ class Budgets:
         for window, data in windows.items():
             key = (pool, connection, window)
             old = self.quotas.get(key)
-            if old and old.get("reset_at") == data.get("reset_at"):
-                delta_pct = data["used_pct"] - old["used_pct"]
-                pattern = "*" + window.removeprefix("weekly_") + "*" if window.startswith("weekly_") else None
-                spent = self.counters.total_since(pool, pattern, old["ts"], now, after=True)
-                if delta_pct >= 1 and spent > 0:
-                    self.calibration[key] = {"connection": connection, "window": window,
-                        "delta_pct": delta_pct, "eusd": spent, "eusd_per_percent": spent / delta_pct,
-                        "suggested_limit": spent * 100 / delta_pct, "ts": now}
+            self.calibrate(pool, window, data, now)
             baseline = old.get("budget_pct", old["used_pct"]) if old else None
             row = dict(data, pool=pool, connection=connection, window=window, ts=now, source=source,
                        stale=False, error=None)
             self.quotas[key] = row
             meaningful = (old is None or abs(baseline - row["used_pct"]) >= 1 or
-                        old.get("reset_at") != row.get("reset_at") or old.get("stale", False) or
+                        not same_cycle(old.get("reset_at"), row.get("reset_at")) or old.get("stale", False) or
                         self.level(old["used_pct"]) != self.level(row["used_pct"]))
             row["budget_pct"] = row["used_pct"] if meaningful else baseline
             changed |= meaningful
@@ -85,6 +87,42 @@ class Budgets:
         if changed:
             self.revision[pool] = self.revision.get(pool, 0) + 1
             self.trigger = "quota"
+
+    def account(self, pool):
+        p = self.settings.pools.get(pool)
+        return (p.account if p else None) or pool
+
+    def account_pools(self, account):
+        return sorted(n for n, p in self.settings.pools.items() if (p.account or n) == account)
+
+    def calibrate(self, pool, window, data, now):
+        """eUSD per upstream percent over a whole cycle: spend of every pool on the account since
+        the cycle's first observation, divided by how far used_pct rose since then. A hint only."""
+        p = self.settings.pools.get(pool)
+        if not p or (len(p.connections) > 1 and not p.account):
+            return  # several accounts in one pool: their spend cannot be told apart
+        account, pct = self.account(pool), data["used_pct"]
+        key = (account, window)
+        cal = self.calibration.get(key)
+        # Without a reset time cycles cannot be told apart. A lower percent alone is no reset:
+        # pools on one account read it seconds apart through different routers.
+        if cal is None or data.get("reset_at") is None or not same_cycle(cal["reset_at"], data["reset_at"]):
+            history = cal["history"] if cal else []
+            if cal and cal["eusd_per_percent"] is not None:
+                history = (history + [{k: v for k, v in cal.items() if k not in ("history", "pools")}])[-CALIBRATION_HISTORY:]
+            self.calibration[key] = {"account": account, "window": window, "pools": self.account_pools(account),
+                                     "reset_at": data.get("reset_at"), "start_ts": now, "start_pct": pct,
+                                     "ts": now, "used_pct": pct, "delta_pct": 0, "eusd": 0.0,
+                                     "eusd_per_percent": None, "suggested_limit": None, "history": history}
+            return
+        pattern = "*" + window.removeprefix("weekly_") + "*" if window.startswith("weekly_") else None
+        pools = self.account_pools(account)
+        spent = sum(self.counters.total_since(n, pattern, cal["start_ts"], now, after=True) for n in pools)
+        delta_pct = pct - cal["start_pct"]
+        ok = delta_pct >= 1 and spent > 0
+        cal.update(pools=pools, reset_at=data["reset_at"], ts=now, used_pct=pct, delta_pct=delta_pct, eusd=spent,
+                   eusd_per_percent=spent / delta_pct if ok else None,
+                   suggested_limit=spent * 100 / delta_pct if ok else None)
 
     @staticmethod
     def level(pct):

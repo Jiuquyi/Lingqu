@@ -374,7 +374,8 @@ class RedisGate(Gate):
         self.sessions.last = collections.OrderedDict(((p, s), t) for p, s, t in data['sessions'])
         b = self.budgets
         b.quotas = {(p, c, w): v for p, c, w, v in data['quotas']}
-        b.calibration = {(p, c, w): v for p, c, w, v in data['calibration']}
+        # Keyed (account, window) since 0.9.1; older (pool, connection, window) hints are dropped.
+        b.calibration = {(row[0], row[1]): row[2] for row in data['calibration'] if len(row) == 3}
         b.revision = data['revision']
         b.cache = {}
         for p, scope, (sig, row) in data['budget_cache']:

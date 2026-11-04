@@ -195,13 +195,14 @@ class QuotaCollector:
     def status(self, pool, now):
         with self.rt.gate.lock:
             windows = self.rt.gate.budgets.windows(pool, now)
-            calibration = [dict(v) for (p, _, _), v in self.rt.gate.budgets.calibration.items() if p == pool]
+            account = self.rt.gate.budgets.account(pool)
+            calibration = [dict(v) for (a, _), v in self.rt.gate.budgets.calibration.items() if a == account]
         enabled = bool(self.rt.settings.upstreams[self.rt.settings.pools[pool].upstream].quota)
         if not enabled and not windows:
             return None
         return {"windows": windows, "stale": not windows or any(q["stale"] for q in windows),
                 "last_error": self.errors.get(pool), "connections": self.connections.get(pool, []),
-                "calibration": calibration}
+                "account": account, "calibration": calibration}
 
     def load(self):
         from .models import UpstreamQuota

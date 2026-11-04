@@ -174,9 +174,39 @@ class BudgetTestCase(unittest.TestCase):
         self.gate.charge(POOL, MODEL, 8)
         self.clock.advance(1)
         self.quota(12, reset=end)
-        hint = self.gate.budgets.calibration[(POOL, "c1", "weekly")]
+        hint = self.gate.budgets.calibration[(POOL, "weekly")]
         self.assertEqual(hint["suggested_limit"], 400)
         self.assertEqual(self.gate.settings.pools[POOL].rules[0].cycle_limit, 1680)
+
+    def test_calibration_spans_the_cycle_and_ignores_reset_jitter(self):
+        end = self.clock() + 18000
+        self.quota(10, window="short", reset=end)
+        for i in range(3):
+            self.clock.advance(180)
+            self.gate.charge(POOL, MODEL, 2)
+            self.quota(11 + i, window="short", reset=end + (0.1 if i % 2 else -0.1))
+        hint = self.gate.budgets.calibration[(POOL, "short")]
+        self.assertEqual((hint["delta_pct"], hint["eusd"], hint["eusd_per_percent"]), (3, 6, 2))
+        self.clock.advance(18000)
+        self.quota(1, window="short", reset=self.clock() + 18000)
+        hint = self.gate.budgets.calibration[(POOL, "short")]
+        self.assertEqual((hint["start_pct"], hint["eusd_per_percent"]), (1, None))
+        self.assertEqual([h["suggested_limit"] for h in hint["history"]], [200])
+
+    def test_pools_on_one_account_share_calibration(self):
+        shared = BASE.replace("keys: [lq-a-claude]", "keys: [lq-a-claude]\n    account: acct1").replace(
+            "keys: [lq-b-claude],", "keys: [lq-b-claude], account: acct1,")
+        self.gate.reload(load(shared))
+        end = self.clock() + 18000
+        self.gate.update_quota(POOL, "c1", {"short": {"used_pct": 10, "reset_at": end}})
+        self.clock.advance(60)
+        self.gate.charge(POOL, MODEL, 3)
+        self.gate.charge("b/claude", MODEL, 5)
+        self.clock.advance(60)
+        self.gate.update_quota("b/claude", "c9", {"short": {"used_pct": 14, "reset_at": end + 0.5}})
+        hint = self.gate.budgets.calibration[("acct1", "short")]
+        self.assertEqual((hint["pools"], hint["eusd"], hint["eusd_per_percent"]), (["a/claude", "b/claude"], 8, 2))
+        self.assertNotIn((POOL, "short"), self.gate.budgets.calibration)
 
     def test_idle_pools_get_hourly_snapshots(self):
         rows = []

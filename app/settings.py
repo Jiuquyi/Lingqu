@@ -79,6 +79,7 @@ class Pool:
     rules: list = field(default_factory=list)
     connections: list = field(default_factory=list)
     priority: int = 0
+    account: str | None = None  # pools naming the same account draw on one subscription
 
     def matches(self, model):
         return any(fnmatch.fnmatchcase(model or "", p) for p in self.match)
@@ -542,6 +543,10 @@ def _pools(ld, s, raw):
         if not isinstance(match, list) or any(not isinstance(m, str) or not m for m in match):
             ld.errors.append(f"pool {name}: match.models must be a list of non-empty patterns")
             match = []
+        account = p.get("account")
+        if account is not None and (not isinstance(account, str) or not account):
+            ld.errors.append(f"pool {name}: account must be a non-empty string")
+            account = None
         priority = p.get("priority", 0)
         if isinstance(priority, bool) or not isinstance(priority, int):
             ld.errors.append(f"pool {name}: priority must be an integer")
@@ -556,7 +561,8 @@ def _pools(ld, s, raw):
         if len(rule_ids) != len(set(rule_ids)):
             ld.errors.append(f"pool {name}: duplicate rule kind, model scope, mode (and shadow limit)")
         s.pools[name] = Pool(name=name, kind=kind, upstream=p.get("upstream"),
-                             keys=[k for k in keys if k], match=list(match), rules=rules, connections=connections, priority=priority)
+                             keys=[k for k in keys if k], match=list(match), rules=rules, connections=connections, priority=priority,
+                             account=account)
         for k in keys:
             if not k:
                 continue
