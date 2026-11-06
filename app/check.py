@@ -52,7 +52,13 @@ def run(app, echo, live=False, path=None):
 
     echo("2. upstreams")
     models = {}
+    used = {p.upstream for p in list(s.pools.values()) + list(s.users.values()) if getattr(p, "upstream", None)}
     for u in s.upstreams.values():
+        if u.name not in used:
+            # No pool sends traffic here: an instance whose dashboard gate is open for setting it up
+            # (accounts and key not in yet), so its LLM API is not probed.
+            r.ok(f"{u.name}: no pool uses it (dashboard gate only), not probed")
+            continue
         try:
             resp = httpx.get(u.base_url + "/v1/models", headers={"Authorization": f"Bearer {u.api_key}"},
                              timeout=10, trust_env=False)

@@ -17,7 +17,7 @@
 | 0.9.0：客户端任意位置断开都保留已读到的 usage；计费失败照写账本并按原 key 补偿；账本行和计量事件幂等写入；运行中请求的输入可在崩溃后恢复；恢复未完成即不 ready；Redis 丢状态时拒绝准入并由单个实例重建；进程级并发 / 请求体上限；预算预留和多档并发的 shadow 对比 | `reserve: enforce` |
 | 0.9.1：多个池共用一个订阅账户时用 `account` 标出，额度校准按账户合并各池费用、按整个周期累计并保留最近 48 个周期；同一周期的重置时间允许 2 分钟抖动（[M4](docs/M4.md)） | |
 | 0.9.2：额度校准不再被旧快照切碎（周期内只认不低于最高值的读数，跳过已过期或没有重置时间的读数），每个周期记下同账户其他窗口的涨幅（`peers`），可按比例在窗口间换算（[M4](docs/M4.md)） | |
-| 0.9.3：`server.private_status` 让状态页只对管理员和本机开放，`server.dashboards_url` 指定关闭页上的开关页地址；状态端口可以对外开放来承载 Dashboard 开关页（[M5](docs/M5.md)） | |
+| 0.9.3：`server.private_status` 让状态页只对管理员和本机开放，`server.dashboards_url` 指定关闭页上的开关页地址；状态端口可以对外开放来承载 Dashboard 开关页；`flask check` 不再探测没有池使用的 upstream（只开 Dashboard 入口、还在接入账号的实例）（[M5](docs/M5.md)） | |
 | `/status`、`/stats`、`/events`、`/healthz`；状态端口 `/` 的只读状态页（池、计量、限速事件） | |
 | M5：Jinja2 + 本地 Bootstrap 控制台、9router 库存/健康/额度同步与对账、模型优先级/歧义/回退、Redis 全局准入、可信用户级限流 | |
 | 9router Dashboard 入口：关闭 / 临时 / 保持打开、opener token、开关页、审计 | |
