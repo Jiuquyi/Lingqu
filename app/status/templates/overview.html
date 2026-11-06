@@ -39,7 +39,8 @@
   code { font-family: ui-monospace, monospace; font-size: 13px; }
 </style>
 </head>
-<body>
+{% from '_nav.html' import site_nav with context %}<body>
+{{ site_nav() }}
 <h1>灵渠状态</h1>
 <div class="sub">
   只读 · 每 15 秒刷新 · {{ now | clock }} · v{{ status.version }} ·

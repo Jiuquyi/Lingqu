@@ -129,6 +129,10 @@ class Settings:
     dashboards_url: str = ""
     # Host the switch page links the gates under; "" -> the host the page was requested on.
     dashboard_gate_host: str = ""
+    # Extra links ({name, url}) for a navigation bar on the HTML pages, next to the overview, the
+    # console and the dashboard switch page; none: no navigation bar (the pages may sit under a
+    # path prefix, where links from the root would point elsewhere).
+    links: list = field(default_factory=list)
     max_active: int = 0                  # proxy requests in the process at once; 0: worker threads - 8
     max_body_in_flight_mb: float = 256   # request bodies held in memory at once
     dsn: str = ""
@@ -274,6 +278,13 @@ def _server(ld, s, raw):
     if not isinstance(s.dashboard_gate_host, str) or not re.fullmatch(r"[A-Za-z0-9.\-:\[\]]*", s.dashboard_gate_host):
         ld.errors.append("server.dashboard_gate_host: must be a host name or address")
         s.dashboard_gate_host = ""
+    links = raw.get("links") or []
+    if not isinstance(links, list) or not all(
+            isinstance(l, dict) and isinstance(l.get("name"), str) and l["name"]
+            and isinstance(l.get("url"), str) and re.match(r"^(https?://|/)", l["url"]) for l in links):
+        ld.errors.append("server.links: must be a list of {name, url}, url absolute or starting with /")
+        links = []
+    s.links = [{"name": l["name"], "url": l["url"]} for l in links]
     if s.private_status and not s.admin_token:
         ld.errors.append("server.private_status needs server.admin_token")
     if not s.admin_token:

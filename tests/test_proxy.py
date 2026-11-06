@@ -353,8 +353,10 @@ class DashboardGateTestCase(unittest.TestCase):
                  .replace("http://r1:20128", self.router.url).replace("http://r2:20128", self.router.url))
         self.rt.settings = s  # same ports and upstreams; only the server options differ
         outside = {"SERVER_PORT": "8091", "REMOTE_ADDR": "203.0.113.5"}
-        for path in ("/", "/status", "/stats", "/events"):
+        for path in ("/status", "/stats", "/events"):
             self.assertEqual(self.c.get(path, environ_overrides=outside).status_code, 401, path)
+        self.assertEqual(self.c.get("/", environ_overrides=outside).status_code, 302)  # a browser: to the login page
+        self.assertEqual(self.c.get("/", environ_overrides=outside, headers={"Authorization": "Bearer bad"}).status_code, 401)
         self.assertEqual(self.c.get("/status", environ_overrides=outside,
                                     headers={"Authorization": "Bearer adm"}).status_code, 200)
         self.assertEqual(self.c.get("/status", environ_overrides={"SERVER_PORT": "8091", "REMOTE_ADDR": "127.0.0.1"}).status_code, 200)
@@ -374,6 +376,29 @@ class DashboardGateTestCase(unittest.TestCase):
         page = self.c.get("/dashboards", environ_overrides=env).get_data(as_text=True)
         self.assertIn("http://203.0.113.9:8101/dashboard", page)
         self.assertNotIn("switch.example:8101", page)
+
+    def test_navigation_only_with_links_and_overview_sends_browsers_to_login(self):
+        env = {"SERVER_PORT": "8091", "REMOTE_ADDR": "127.0.0.1"}
+        self.assertNotIn("lq-nav", self.c.get("/", environ_overrides=env).get_data(as_text=True))
+        s = load(BASE.replace("server: { admin_token: adm, fail_mode: open }",
+                              "server: { admin_token: adm, fail_mode: open, private_status: true, "
+                              "links: [{name: 用量, url: /usage/}] }")
+                 .replace("http://r1:20128", self.router.url).replace("http://r2:20128", self.router.url))
+        self.rt.settings = s
+        for path in ("/", "/dashboards", "/console/login"):
+            page = self.c.get(path, environ_overrides=env).get_data(as_text=True)
+            self.assertIn('href="/usage/"', page, path)
+            self.assertIn('href="/console"', page, path)
+            self.assertIn('href="/dashboards"', page, path)
+        self.assertIn('aria-current="page">9router 仪表盘', self.c.get("/dashboards", environ_overrides=env).get_data(as_text=True))
+        outside = {"SERVER_PORT": "8091", "REMOTE_ADDR": "203.0.113.5"}
+        r = self.c.get("/?period=7d", environ_overrides=outside)
+        self.assertEqual(r.status_code, 302)
+        self.assertIn("/console/login?next=", r.headers["Location"])
+        self.assertEqual(self.c.get("/status", environ_overrides=outside).status_code, 401)
+        _, errors, _ = read_settings(text=BASE.replace("server: { admin_token: adm, fail_mode: open }",
+                                                       "server: { admin_token: adm, links: [{name: x, url: 'javascript:1'}] }"))
+        self.assertTrue(any(e.startswith("server.links") for e in errors))
 
     def test_private_status_needs_an_admin_token(self):
         _, errors, _ = read_settings(text=BASE.replace("server: { admin_token: adm, fail_mode: open }",

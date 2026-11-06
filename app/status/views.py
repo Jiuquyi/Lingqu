@@ -42,7 +42,30 @@ STATUS_PAGES = {"status.overview", "status.status_json", "status.stats_json", "s
 def _private_status():
     if (request.endpoint in STATUS_PAGES and rt().settings.private_status
             and request.remote_addr not in ("127.0.0.1", "::1")):
+        if request.endpoint == "status.overview" and not bearer():
+            # A browser: log in to the console, then come back.
+            from .console import console_authenticated
+            if not console_authenticated():
+                return redirect(url_for("status.console_login", next=request.full_path.rstrip("?")))
         require_admin()
+
+
+@status.app_context_processor
+def _nav_context():
+    """nav_links for _nav.html: the built-in pages plus server.links; empty without server.links."""
+    links = rt().settings.links
+    if not links:
+        return {"nav_links": []}
+    pages = [{"name": "灵渠总览", "url": url_for("status.overview")},
+             {"name": "控制台", "url": url_for("status.console")},
+             {"name": "9router 仪表盘", "url": url_for("status.dashboards_page")}]
+    out = []
+    for l in pages + links:
+        path = l["url"].split("?")[0]
+        current = request.path == path if path in ("/", "/console", "/dashboards") else (
+            path.startswith("/") and path != "/" and request.path.startswith(path))
+        out.append({**l, "current": current})
+    return {"nav_links": out}
 
 
 PERIODS = [("today", "今天"), ("24h", "24 小时"), ("7d", "7 天"), ("30d", "30 天")]

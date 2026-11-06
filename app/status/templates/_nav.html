@@ -1,0 +1,15 @@
+{# Site navigation, shown when server.links is configured. dark: inside the console's navbar. #}
+{% macro site_nav(dark=False) %}{% if nav_links %}
+<nav class="lq-nav{{ ' lq-nav-dark' if dark }}" aria-label="导航">
+  {% for link in nav_links %}<a href="{{ link.url }}"{% if link.current %} aria-current="page"{% endif %}>{{ link.name }}</a>{% endfor %}
+</nav>
+<style>
+  .lq-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.1rem; margin: 0 0 1rem; padding-bottom: .5rem; border-bottom: 1px solid var(--line, #d2d2d7); font-size: .95rem; }
+  .lq-nav a { color: var(--accent, #0a66c2); text-decoration: none; }
+  .lq-nav a:hover { text-decoration: underline; }
+  .lq-nav a[aria-current=page] { color: inherit; font-weight: 600; }
+  .lq-nav-dark { margin: 0 0 0 1.5rem; padding: 0; border: 0; align-items: center; }
+  .lq-nav-dark a { color: #c9d1d9; }
+  .lq-nav-dark a[aria-current=page] { color: #fff; }
+</style>
+{% endif %}{% endmacro %}

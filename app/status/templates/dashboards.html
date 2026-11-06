@@ -22,7 +22,8 @@
   .wrap { overflow-x: auto; }
 </style>
 </head>
-<body>
+{% from '_nav.html' import site_nav with context %}<body>
+{{ site_nav() }}
 <h1>9router Dashboard 入口</h1>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 {% if not logged_in %}
