@@ -8,6 +8,7 @@ from werkzeug.test import Client
 from app import create_app, db
 from app.ports import PortDispatcher
 from tests.fake_router import FakeRouter, anthropic_stream, gzipped, sse_chunks
+from app.settings import load as read_settings
 from tests.helpers import BASE, load
 
 SSE = [("Content-Type", "text/event-stream")]
@@ -344,6 +345,28 @@ class DashboardGateTestCase(unittest.TestCase):
             self.assertEqual(self.gate(path).status_code, 404, path)
         self.assertEqual(len(self.router.requests), 1)
         self.assertEqual(self.gate("/dashboard", port="8102").status_code, 503)  # r2 still closed
+
+    def test_private_status_keeps_the_switch_page_public(self):
+        s = load(BASE.replace("server: { admin_token: adm, fail_mode: open }",
+                              "server: { admin_token: adm, fail_mode: open, private_status: true, "
+                              "dashboards_url: 'http://example.com:3600/dashboards' }")
+                 .replace("http://r1:20128", self.router.url).replace("http://r2:20128", self.router.url))
+        self.rt.settings = s  # same ports and upstreams; only the server options differ
+        outside = {"SERVER_PORT": "8091", "REMOTE_ADDR": "203.0.113.5"}
+        for path in ("/", "/status", "/stats", "/events"):
+            self.assertEqual(self.c.get(path, environ_overrides=outside).status_code, 401, path)
+        self.assertEqual(self.c.get("/status", environ_overrides=outside,
+                                    headers={"Authorization": "Bearer adm"}).status_code, 200)
+        self.assertEqual(self.c.get("/status", environ_overrides={"SERVER_PORT": "8091", "REMOTE_ADDR": "127.0.0.1"}).status_code, 200)
+        for path in ("/healthz", "/dashboards"):
+            self.assertEqual(self.c.get(path, environ_overrides=outside).status_code, 200, path)
+        page = self.gate("/dashboard").get_data(as_text=True)
+        self.assertIn("http://example.com:3600/dashboards", page)
+
+    def test_private_status_needs_an_admin_token(self):
+        _, errors, _ = read_settings(text=BASE.replace("server: { admin_token: adm, fail_mode: open }",
+                                                       "server: { fail_mode: open, private_status: true }"))
+        self.assertIn("server.private_status needs server.admin_token", errors)
 
     def test_temporary_expires(self):
         clock = [time.time()]

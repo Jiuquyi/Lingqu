@@ -34,6 +34,17 @@ def require_admin():
         abort(401)
 
 
+# Read-only pages that are open to anyone who reaches the status port, unless private_status.
+STATUS_PAGES = {"status.overview", "status.status_json", "status.stats_json", "status.events_json"}
+
+
+@status.before_request
+def _private_status():
+    if (request.endpoint in STATUS_PAGES and rt().settings.private_status
+            and request.remote_addr not in ("127.0.0.1", "::1")):
+        require_admin()
+
+
 PERIODS = [("today", "今天"), ("24h", "24 小时"), ("7d", "7 天"), ("30d", "30 天")]
 EVENT_NAMES = {"throttle_start": "开始排队", "throttle_end": "解除", "step_change": "换档", "rejected": "拒绝（503）",
                "quota_minimum": "额度 ≥90% 最低预算", "quota_reject": "额度 ≥98% 拒绝", "quota_recovered": "额度刹车解除",

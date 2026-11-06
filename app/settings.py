@@ -122,6 +122,11 @@ class Settings:
     fail_mode: str = "open"
     proxy_port: int = 8090
     status_port: int = 8091
+    # Status pages (/, /status, /stats, /events) need the admin token except from loopback: for a
+    # status port reachable from outside the cluster, so it can carry the dashboard switch page.
+    private_status: bool = False
+    # Where a closed dashboard gate sends people to open it; "" -> http://<host>:<status_port>/dashboards.
+    dashboards_url: str = ""
     max_active: int = 0                  # proxy requests in the process at once; 0: worker threads - 8
     max_body_in_flight_mb: float = 256   # request bodies held in memory at once
     dsn: str = ""
@@ -255,6 +260,16 @@ def _server(ld, s, raw):
     if s.max_active < 0:
         ld.errors.append("server.max_active: must be 0 (worker threads - 8) or more")
     s.max_body_in_flight_mb = ld.number("server.max_body_in_flight_mb", raw.get("max_body_in_flight_mb"), 256)
+    s.private_status = raw.get("private_status", False)
+    if not isinstance(s.private_status, bool):
+        ld.errors.append("server.private_status: must be true or false")
+        s.private_status = False
+    s.dashboards_url = raw.get("dashboards_url") or ""
+    if not isinstance(s.dashboards_url, str) or (s.dashboards_url and not re.match(r"^https?://", s.dashboards_url)):
+        ld.errors.append("server.dashboards_url: must be an http(s) URL")
+        s.dashboards_url = ""
+    if s.private_status and not s.admin_token:
+        ld.errors.append("server.private_status needs server.admin_token")
     if not s.admin_token:
         ld.warnings.append("server.admin_token is empty: admin endpoints are disabled")
 

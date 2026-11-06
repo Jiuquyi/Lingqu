@@ -5,6 +5,9 @@ server:
   fail_mode: open                     # open | closed (DESIGN §4.7)
   proxy_port: 8090
   status_port: 8091
+  # When the status port is reachable from outside (to carry the /dashboards switch page):
+  # private_status: true              # /, /status, /stats, /events need the admin token, except from loopback
+  # dashboards_url: http://gw.example:3600/dashboards   # the link a closed dashboard gate shows
   # Process-wide limits, checked before a request body is read (docs/RELIABILITY.md):
   # max_active: 0                     # proxy requests in the process; 0 = worker threads - 8
   # max_body_in_flight_mb: 256        # request bodies held in memory at once

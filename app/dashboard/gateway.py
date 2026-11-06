@@ -45,7 +45,8 @@ class DashboardGateway:
         if is_llm_path(path):
             return _page("404 Not Found", "Not found", "<p>LLM API paths are not served on the dashboard gate.</p>")
         if not rt.exposure.is_open(self.upstream):
-            where = f"http://{environ.get('HTTP_HOST', '').split(':')[0]}:{rt.settings.status_port}/dashboards"
+            where = (rt.settings.dashboards_url or
+                     f"http://{environ.get('HTTP_HOST', '').split(':')[0]}:{rt.settings.status_port}/dashboards")
             return _page("503 Service Unavailable", "Dashboard 入口已关闭",
                          f"<p>{html.escape(self.upstream)} 的 9router Dashboard 入口目前是关闭的。</p>"
                          f"<p>请到 <a href=\"{html.escape(where)}\">{html.escape(where)}</a> 用你的 token 打开。</p>")

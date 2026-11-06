@@ -20,7 +20,7 @@ from .quota import QuotaCollector
 from .manager import Manager
 
 log = logging.getLogger("lingqu")
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 # Error classes that need a person, alerted when a pool sees them several times in a row.
 ALERT_CLASSES = {"account_auth": "upstream account authorization failed; re-authorize it in 9router",
                  "router_unreachable": "cannot connect to 9router"}
