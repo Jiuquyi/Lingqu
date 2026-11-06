@@ -206,7 +206,12 @@ class ConsoleTest(unittest.TestCase):
     def test_auth_check_for_forward_auth_and_return_after_login(self):
         r = self.client.get('/console/auth-check', headers={'X-Forwarded-Uri': '/usage/?period=7d'})
         self.assertEqual(r.status_code, 302)
-        self.assertIn('/console/login?next=/usage/', r.headers['Location'].replace('%2F', '/').replace('%3F', '?'))
+        self.assertTrue(r.headers['Location'].replace('%2F', '/').startswith('/console/login?next=/usage/'), r.headers['Location'])
+        r = self.client.get('/console/auth-check', headers={'X-Forwarded-Uri': '/usage/', 'X-Forwarded-Host': 'r.example',
+                                                              'X-Forwarded-Proto': 'https'})
+        self.assertTrue(r.headers['Location'].replace('%2F', '/').startswith('https://r.example/console/login?next=/usage/'))
+        r = self.client.get('/console/auth-check', headers={'X-Forwarded-Host': 'evil.example/x?'})
+        self.assertTrue(r.headers['Location'].startswith('/console/login'), r.headers['Location'])
         self.assertEqual(self.client.get('/console/auth-check', headers={'Authorization': 'Bearer adm'}).status_code, 204)
         for bad in ('https://evil.example/', '//evil.example/', '/\\evil'):
             r = self.client.get('/console/auth-check', headers={'X-Forwarded-Uri': bad})

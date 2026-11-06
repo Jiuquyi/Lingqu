@@ -1,6 +1,7 @@
 """Server-rendered administrative console: signed login cookie + per-session CSRF token."""
 import hashlib
 import hmac
+import re
 import secrets
 
 from werkzeug.exceptions import HTTPException
@@ -64,7 +65,15 @@ def console_auth_check():
     if console_authenticated() or (token and hmac.compare_digest(bearer(), token)):
         return '', 204
     target = safe_next(request.headers.get('X-Forwarded-Uri', '')) or safe_next(request.args.get('next'))
-    return redirect(url_for('status.console_login', next=target) if target else url_for('status.console_login'), 302)
+    location = url_for('status.console_login', next=target) if target else url_for('status.console_login')
+    # The proxy asked under its own (internal) name and resolves a relative Location against it
+    # (Traefik does): name the host the browser is on, from the proxy's forwarded headers.
+    host, proto = request.headers.get('X-Forwarded-Host', ''), request.headers.get('X-Forwarded-Proto', 'https')
+    if re.fullmatch(r'[A-Za-z0-9.-]+(:[0-9]+)?', host) and proto in ('http', 'https'):
+        location = f'{proto}://{host}{location}'
+    resp = redirect(location, 302)
+    resp.autocorrect_location_header = False
+    return resp
 
 
 @status.route('/console/login', methods=['GET', 'POST'])
