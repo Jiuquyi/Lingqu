@@ -208,6 +208,39 @@ class BudgetTestCase(unittest.TestCase):
         self.assertEqual((hint["pools"], hint["eusd"], hint["eusd_per_percent"]), (["a/claude", "b/claude"], 8, 2))
         self.assertNotIn((POOL, "short"), self.gate.budgets.calibration)
 
+    def test_cached_readings_of_an_ended_cycle_do_not_split_it(self):
+        old = self.clock() - 60
+        end = self.clock() + 18000
+        self.quota(5, window="short", reset=end)
+        self.clock.advance(180)
+        self.gate.charge(POOL, MODEL, 4)
+        self.quota(43, window="short", reset=old)  # one router still serves the last cycle
+        self.quota(42, window="short", reset=end - 7200)  # older than the current cycle
+        self.gate.update_quota(POOL, "c1", {"short": {"used_pct": 0, "reset_at": None}})
+        self.quota(7, window="short", reset=end)
+        self.clock.advance(180)
+        self.quota(6, window="short", reset=end)  # a router stuck on a snapshot of this cycle
+        hint = self.gate.budgets.calibration[(POOL, "short")]
+        self.assertEqual((hint["start_pct"], hint["used_pct"], hint["eusd"], hint["history"]), (5, 7, 4, []))
+
+    def test_calibration_tracks_how_far_other_windows_rose(self):
+        week, end = self.clock() + 604800, self.clock() + 18000
+        self.gate.update_quota(POOL, "c1", {"short": {"used_pct": 0, "reset_at": end},
+                                            "weekly": {"used_pct": 30, "reset_at": week}})
+        self.clock.advance(60)  # the short cycle starts after the weekly one is known
+        self.gate.update_quota(POOL, "c1", {"short": {"used_pct": 0, "reset_at": end + 18000}})
+        for short, weekly in ((40, 35), (80, 41)):
+            self.clock.advance(3600)
+            self.gate.update_quota(POOL, "c1", {"weekly": {"used_pct": weekly, "reset_at": week}})
+            self.gate.update_quota(POOL, "c1", {"short": {"used_pct": short, "reset_at": end + 18000}})
+        peer = self.gate.budgets.calibration[(POOL, "short")]["peers"]["weekly"]
+        self.assertEqual((peer["start_pct"], peer["used_pct"], peer["delta_pct"]), (30, 41, 11))
+        self.clock.advance(3600)
+        self.gate.update_quota(POOL, "c1", {"weekly": {"used_pct": 1, "reset_at": week + 604800}})
+        self.gate.update_quota(POOL, "c1", {"short": {"used_pct": 90, "reset_at": end + 18000}})
+        peer = self.gate.budgets.calibration[(POOL, "short")]["peers"]["weekly"]
+        self.assertEqual((peer["used_pct"], peer["delta_pct"]), (41, None))
+
     def test_idle_pools_get_hourly_snapshots(self):
         rows = []
         self.gate.budgets.on_snapshot = rows.append

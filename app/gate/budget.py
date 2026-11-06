@@ -101,20 +101,43 @@ class Budgets:
         p = self.settings.pools.get(pool)
         if not p or (len(p.connections) > 1 and not p.account):
             return  # several accounts in one pool: their spend cannot be told apart
-        account, pct = self.account(pool), data["used_pct"]
+        account, pct, reset = self.account(pool), data["used_pct"], data.get("reset_at")
         key = (account, window)
         cal = self.calibration.get(key)
-        # Without a reset time cycles cannot be told apart. A lower percent alone is no reset:
-        # pools on one account read it seconds apart through different routers.
-        if cal is None or data.get("reset_at") is None or not same_cycle(cal["reset_at"], data["reset_at"]):
+        # Without a reset time cycles cannot be told apart, so such a reading is skipped. One whose
+        # cycle has already ended, or is older than the one being calibrated, is a router serving
+        # a cached value; letting it end the cycle splits one cycle into many.
+        if reset is None or reset <= now or (cal and cal["reset_at"] is not None and
+                                             reset < cal["reset_at"] - RESET_JITTER):
+            return
+        # A lower percent alone is no reset: pools on one account read it seconds apart through
+        # different routers.
+        if cal is None or not same_cycle(cal["reset_at"], reset):
             history = cal["history"] if cal else []
             if cal and cal["eusd_per_percent"] is not None:
                 history = (history + [{k: v for k, v in cal.items() if k not in ("history", "pools")}])[-CALIBRATION_HISTORY:]
+            # How far the account's other windows rose over this cycle: their ratio to this one
+            # holds whoever spends, so it carries a value across windows (docs/M4.md).
+            peers = {w: {"reset_at": c["reset_at"], "start_pct": c["used_pct"], "used_pct": c["used_pct"], "delta_pct": 0}
+                     for (a, w), c in self.calibration.items() if a == account and w != window and c["reset_at"] is not None}
             self.calibration[key] = {"account": account, "window": window, "pools": self.account_pools(account),
-                                     "reset_at": data.get("reset_at"), "start_ts": now, "start_pct": pct,
+                                     "reset_at": reset, "start_ts": now, "start_pct": pct,
                                      "ts": now, "used_pct": pct, "delta_pct": 0, "eusd": 0.0,
-                                     "eusd_per_percent": None, "suggested_limit": None, "history": history}
+                                     "eusd_per_percent": None, "suggested_limit": None, "peers": peers,
+                                     "history": history}
             return
+        # Within a cycle the percent only rises. A lower reading is an older one: a lagging router
+        # or one stuck on a cached snapshot whose reset time is still ahead.
+        if pct < cal["used_pct"]:
+            return
+        for w, peer in cal.get("peers", {}).items():
+            other = self.calibration.get((account, w))
+            if peer["delta_pct"] is None:
+                continue
+            if other is None or not same_cycle(other["reset_at"], peer["reset_at"]):
+                peer["delta_pct"] = None  # that window reset meanwhile: the rises no longer compare
+            else:
+                peer.update(used_pct=other["used_pct"], delta_pct=other["used_pct"] - peer["start_pct"])
         pattern = "*" + window.removeprefix("weekly_") + "*" if window.startswith("weekly_") else None
         pools = self.account_pools(account)
         spent = sum(self.counters.total_since(n, pattern, cal["start_ts"], now, after=True) for n in pools)
