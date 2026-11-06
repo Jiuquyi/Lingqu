@@ -363,6 +363,18 @@ class DashboardGateTestCase(unittest.TestCase):
         page = self.gate("/dashboard").get_data(as_text=True)
         self.assertIn("http://example.com:3600/dashboards", page)
 
+    def test_switch_page_links_gates_under_the_configured_host(self):
+        s = load(BASE.replace("server: { admin_token: adm, fail_mode: open }",
+                              "server: { admin_token: adm, fail_mode: open, dashboard_gate_host: 203.0.113.9 }")
+                 .replace("http://r1:20128", self.router.url).replace("http://r2:20128", self.router.url))
+        self.rt.settings = s
+        self.admin("POST", "/admin/dashboards/r1/open", json={"for": "30m"})
+        env = {"SERVER_PORT": "8091", "HTTP_HOST": "switch.example"}
+        self.c.post("/dashboards", data={"action": "login", "token": "adm"}, environ_overrides=env)
+        page = self.c.get("/dashboards", environ_overrides=env).get_data(as_text=True)
+        self.assertIn("http://203.0.113.9:8101/dashboard", page)
+        self.assertNotIn("switch.example:8101", page)
+
     def test_private_status_needs_an_admin_token(self):
         _, errors, _ = read_settings(text=BASE.replace("server: { admin_token: adm, fail_mode: open }",
                                                        "server: { fail_mode: open, private_status: true }"))

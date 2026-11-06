@@ -8,6 +8,7 @@ server:
   # When the status port is reachable from outside (to carry the /dashboards switch page):
   # private_status: true              # /, /status, /stats, /events need the admin token, except from loopback
   # dashboards_url: http://gw.example:3600/dashboards   # the link a closed dashboard gate shows
+  # dashboard_gate_host: 203.0.113.9  # where the switch page links the gates, when it is served on another name
   # Process-wide limits, checked before a request body is read (docs/RELIABILITY.md):
   # max_active: 0                     # proxy requests in the process; 0 = worker threads - 8
   # max_body_in_flight_mb: 256        # request bodies held in memory at once

@@ -298,6 +298,8 @@ def dashboards_page():
                 resp.delete_cookie(TOKEN_COOKIE)
             return resp
     rows = dash_view(token) if token else []
-    host = request.host.split(":")[0]
+    # The switch page may sit behind a proxy on another name (HTTPS, maybe under HSTS) while the
+    # gates are plain ports on the node: dashboard_gate_host names where the gates are.
+    host = rt().settings.dashboard_gate_host or request.host.split(":")[0]
     return render_template("dashboards.html", rows=rows, logged_in=bool(rows), error=error, host=host,
                            now=time.time())

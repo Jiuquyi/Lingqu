@@ -127,6 +127,8 @@ class Settings:
     private_status: bool = False
     # Where a closed dashboard gate sends people to open it; "" -> http://<host>:<status_port>/dashboards.
     dashboards_url: str = ""
+    # Host the switch page links the gates under; "" -> the host the page was requested on.
+    dashboard_gate_host: str = ""
     max_active: int = 0                  # proxy requests in the process at once; 0: worker threads - 8
     max_body_in_flight_mb: float = 256   # request bodies held in memory at once
     dsn: str = ""
@@ -268,6 +270,10 @@ def _server(ld, s, raw):
     if not isinstance(s.dashboards_url, str) or (s.dashboards_url and not re.match(r"^https?://", s.dashboards_url)):
         ld.errors.append("server.dashboards_url: must be an http(s) URL")
         s.dashboards_url = ""
+    s.dashboard_gate_host = raw.get("dashboard_gate_host") or ""
+    if not isinstance(s.dashboard_gate_host, str) or not re.fullmatch(r"[A-Za-z0-9.\-:\[\]]*", s.dashboard_gate_host):
+        ld.errors.append("server.dashboard_gate_host: must be a host name or address")
+        s.dashboard_gate_host = ""
     if s.private_status and not s.admin_token:
         ld.errors.append("server.private_status needs server.admin_token")
     if not s.admin_token:
