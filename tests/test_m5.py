@@ -203,6 +203,25 @@ class ConsoleTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         response.close()
 
+    def test_auth_check_for_forward_auth_and_return_after_login(self):
+        r = self.client.get('/console/auth-check', headers={'X-Forwarded-Uri': '/usage/?period=7d'})
+        self.assertEqual(r.status_code, 302)
+        self.assertIn('/console/login?next=/usage/', r.headers['Location'].replace('%2F', '/').replace('%3F', '?'))
+        self.assertEqual(self.client.get('/console/auth-check', headers={'Authorization': 'Bearer adm'}).status_code, 204)
+        for bad in ('https://evil.example/', '//evil.example/', '/\\evil'):
+            r = self.client.get('/console/auth-check', headers={'X-Forwarded-Uri': bad})
+            self.assertEqual(r.headers['Location'].split('?')[0].rstrip('/').rsplit('/', 1)[-1], 'login', bad)
+            self.assertNotIn('evil', r.headers['Location'], bad)
+        page = self.client.get('/console/login?next=/usage/').get_data(as_text=True)
+        self.assertIn('name="next" value="/usage/"', page)
+        csrf = re.search(r'name="csrf_token" value="([^"]+)"', page)[1]
+        r = self.client.post('/console/login', data={'token': 'adm', 'csrf_token': csrf, 'next': '/usage/'})
+        self.assertEqual((r.status_code, r.headers['Location']), (303, '/usage/'))
+        self.assertEqual(self.client.get('/console/auth-check').status_code, 204)
+        self.client.post('/console/logout', data={'csrf_token': csrf})
+        r = self.client.post('/console/login', data={'token': 'adm', 'csrf_token': self.token(), 'next': '//evil.example/'})
+        self.assertEqual(r.headers['Location'], '/console')
+
     def test_override_requires_csrf(self):
         csrf = self.login()
         form = {'action': 'override', 'pool': POOL, 'mode': 'limit', 'value': '5', 'duration': '30m'}

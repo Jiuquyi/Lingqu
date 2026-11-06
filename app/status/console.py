@@ -47,9 +47,30 @@ def console_headers(response):
     return response
 
 
+def safe_next(value):
+    """A same-site path to return to after login, or None: never another host (open redirect)."""
+    if not value or not value.startswith('/') or value.startswith('//') or '\\' in value:
+        return None
+    return value
+
+
+@status.route('/console/auth-check')
+def console_auth_check():
+    """For a reverse proxy's forward-auth (Traefik forwardAuth): 204 when this browser is logged in
+    to the console (or sends the admin token), else a redirect to the login page that returns to
+    the page asked for. Lets another app on the same host share the console login."""
+    token = rt().settings.admin_token
+    from .views import bearer
+    if console_authenticated() or (token and hmac.compare_digest(bearer(), token)):
+        return '', 204
+    target = safe_next(request.headers.get('X-Forwarded-Uri', '')) or safe_next(request.args.get('next'))
+    return redirect(url_for('status.console_login', next=target) if target else url_for('status.console_login'), 302)
+
+
 @status.route('/console/login', methods=['GET', 'POST'])
 def console_login():
     error = None
+    target = safe_next(request.values.get('next'))
     if request.method == 'POST':
         check_csrf()
         token = request.form.get('token', '')
@@ -58,9 +79,9 @@ def console_login():
             session.permanent = True
             session['console_auth'] = hashlib.sha256(token.encode()).hexdigest()
             csrf_token()
-            return redirect(url_for('status.console'), 303)
+            return redirect(target or url_for('status.console'), 303)
         error = '管理员 token 无效'
-    return render_template('console_login.html', error=error), (401 if error else 200)
+    return render_template('console_login.html', error=error, next=target), (401 if error else 200)
 
 
 @status.route('/console/logout', methods=['POST'])
