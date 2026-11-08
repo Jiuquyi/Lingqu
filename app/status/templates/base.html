@@ -1,0 +1,35 @@
+<!doctype html>
+{% from '_nav.html' import site_nav with context %}
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  {% block head %}{% endblock %}
+  <title>{% block title %}灵渠 · 流量管理{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='lingqu.css') }}">
+  {% block styles %}{% endblock %}
+</head>
+<body>
+  <a class="lq-skip-link" href="#main">跳到主要内容</a>
+  <header class="lq-header">
+    <div class="lq-header-inner">
+      <a class="lq-brand" href="{{ url_for('status.overview') }}" aria-label="灵渠首页">
+        <svg class="lq-brand-mark" width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true"><rect width="32" height="32" rx="9" fill="currentColor"/><path d="M9 9v6a5 5 0 0 0 5 5h9M9 24v-2a5 5 0 0 1 5-5h4a5 5 0 0 0 5-5V8" stroke="var(--lq-on-accent)" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>灵渠 <small>Lingqu</small></span>
+      </a>
+      {{ site_nav() }}
+      <div class="lq-header-actions">{% block header_actions %}{% endblock %}</div>
+    </div>
+  </header>
+  <main id="main" class="lq-main {% block main_class %}{% endblock %}">
+    {% for category, message in get_flashed_messages(with_categories=true) %}
+    <div class="alert alert-{{ category }}" role="alert">{{ message }}</div>
+    {% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="lq-footer"><span>灵渠 · 流量管理</span><span>{% block footer %}计量 · 调度 · 运行管理{% endblock %}</span></footer>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

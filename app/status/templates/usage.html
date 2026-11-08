@@ -1,0 +1,65 @@
+{% extends 'base.html' %}
+{% block title %}{{ usage.title }} · 灵渠{% endblock %}
+{% block main_class %}lq-usage{% endblock %}
+{% block styles %}<link rel="stylesheet" href="{{ url_for('static', filename='usage.css') }}">{% endblock %}
+{% block content %}
+
+<div class="lq-page-head">
+  <div><div class="lq-eyebrow">用量与计费</div><h1>{{ usage.title }}</h1><p>各组 Claude / Codex 的使用情况与账户额度</p></div>
+  <span class="sync" id="sync" role="status" aria-live="polite">正在读取日志…</span>
+</div>
+
+  <section>
+    <div class="sec-head">
+      <h2>账户额度</h2>
+      <span class="sub" id="quota-sub">复用灵渠额度采集快照</span>
+      <span class="sub" title="5 小时窗口比例涨不到 10% 的周期不计。网关外的用量也会让比例上涨，只会把折合值拉低，所以取最高值，也就是受旁路流量影响最小的那个周期，但仍只能当下限。每周窗口由 5 小时的最高值按两个比例的上涨速度换算（这个比例和流量从哪里来无关，只用 5 小时比例涨满 30% 的周期算）；数据还不够时直接按周窗口算，或显示本周期的值并标“样本少”。">折合：过去 5 周 5 小时窗口的最高值，每周按比例换算；按 API 公开价算一个满窗口值多少钱</span>
+    </div>
+    <div class="quota-grid" id="quotas"><div class="card empty">加载中…</div></div>
+  </section>
+
+  <div class="filters" role="toolbar" aria-label="筛选">
+    <div class="seg" id="f-period" aria-label="时间范围"></div>
+    <div class="seg" id="f-provider" aria-label="上游"></div>
+    <div class="seg" id="f-group" aria-label="分组"></div>
+  </div>
+
+  <div id="scoped">
+    <section>
+      <div class="tiles" id="tiles"></div>
+    </section>
+
+    <section class="card chart-card">
+      <div class="sec-head">
+        <h2 id="chart-title">{{ usage.cost_label }}</h2>
+        <div class="seg" id="f-metric" aria-label="指标"></div>
+        <div class="legend" id="legend"></div>
+      </div>
+      <svg id="chart" role="img" aria-label="按分组堆叠的用量柱状图"></svg>
+      <div class="tip" id="tip"></div>
+    </section>
+
+    <section class="two">
+      <div class="card">
+        <div class="sec-head">
+          <h2>明细</h2>
+          <div class="seg" id="f-table" aria-label="维度"></div>
+        </div>
+        <div class="tbl-wrap" tabindex="0" role="region" aria-label="用量明细"><table id="table"></table></div>
+      </div>
+      <div class="card">
+        <div class="sec-head"><h2>最近请求</h2><span class="sub">最新 80 条</span></div>
+        <div class="recent tbl-wrap" tabindex="0" role="region" aria-label="最近请求"><table id="recent"></table></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="lq-meta">
+    {{ usage.cost_note }}
+    输入 = 未命中缓存的输入；缓存读 / 缓存写单独列出。失败请求来自 New API 错误日志。
+  </div>
+{% endblock %}
+{% block scripts %}
+<script type="application/json" id="usage-config">{{ usage_frontend | tojson }}</script>
+<script src="{{ url_for('static', filename='usage.js') }}" defer></script>
+{% endblock %}

@@ -1,0 +1,23 @@
+# Kustomize strategic-merge patch, not a standalone Deployment.
+# Add under patches in the same Kustomization that generates usage-env.
+# Kustomize rewrites this logical Secret name to its generated hashed name.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lingqu
+spec:
+  template:
+    spec:
+      containers:
+        - name: lingqu
+          env:
+            - name: NEWAPI_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: usage-env
+                  key: NEWAPI_ACCESS_TOKEN
+            - name: NEWAPI_USER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: usage-env
+                  key: NEWAPI_USER_ID

@@ -52,18 +52,29 @@ def _private_status():
 
 @status.app_context_processor
 def _nav_context():
-    """nav_links for _nav.html: the built-in pages plus server.links; empty without server.links."""
+    """Built-in pages plus server.links; enabling usage also enables shared navigation."""
     links = rt().settings.links
-    if not links:
+    if not links and not rt().settings.usage:
         return {"nav_links": []}
     pages = [{"name": "灵渠总览", "url": url_for("status.overview")},
              {"name": "控制台", "url": url_for("status.console")},
              {"name": "9router 仪表盘", "url": url_for("status.dashboards_page")}]
+    if rt().settings.usage:
+        usage_url = url_for("status.usage_page")
+        pages.append({"name": "用量分析", "url": usage_url})
+        links = [link for link in links if link["url"].split("?")[0].rstrip("/")
+                 not in ("/usage", usage_url.rstrip("/"))]
     out = []
     for l in pages + links:
         path = l["url"].split("?")[0]
-        current = request.path == path if path in ("/", "/console", "/dashboards") else (
-            path.startswith("/") and path != "/" and request.path.startswith(path))
+        if request.script_root and path.startswith(request.script_root + "/"):
+            path = path[len(request.script_root):]
+        if path == "/console":
+            current = request.path == path or request.path.startswith(path + "/")
+        elif path in ("/", "/dashboards"):
+            current = request.path == path
+        else:
+            current = path.startswith("/") and path != "/" and request.path.startswith(path)
         out.append({**l, "current": current})
     return {"nav_links": out}
 

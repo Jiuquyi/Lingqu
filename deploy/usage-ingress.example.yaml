@@ -1,0 +1,21 @@
+# Example cutover for r.jiuquyi.com, after the new Lingqu image/config is ready.
+# This higher-priority route leaves the old usage route/service available for rollback.
+# Optional: add this file to the deployment repository's Kustomization resources.
+# Authentication is enforced by Lingqu itself; no forwardAuth middleware is needed here.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: lingqu-usage
+  namespace: jiuquyi
+spec:
+  entryPoints: [websecure]
+  tls:
+    secretName: r-jiuquyi-tls
+  routes:
+    - match: Host(`r.jiuquyi.com`) && (Path(`/usage`) || PathPrefix(`/usage/`))
+      priority: 60
+      middlewares:
+        - name: hsts
+      services:
+        - name: lingqu
+          port: 8091

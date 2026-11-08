@@ -1,4 +1,5 @@
 {% extends 'console_base.html' %}
+{% macro pool_badge(p) %}<span class="badge {{ 'bad' if p.state == 'rejected' else 'warn' if p.state in ['queuing','override'] else 'ok' if p.limit else '' }}">{{ {'open':'放行' if p.limit else '只计量','queuing':'排队中','rejected':'保护性拒绝','override':'临时取消限额'}.get(p.state,p.state) }}</span>{% endmacro %}
 {% macro csrf() %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endmacro %}
 {% macro action(name,label,upstream='') %}<form method="post" class="d-inline">{{ csrf() }}<input type="hidden" name="action" value="{{ name }}">
 <input type="hidden" name="upstream" value="{{ upstream }}">
@@ -28,26 +29,21 @@
 </tr>{% endfor %}</tbody>
 </table>
 </div>{% endmacro %}
-{% block logout %}<form method="post" action="{{ url_for('status.console_logout') }}">{{ csrf() }}<button class="btn btn-outline-light btn-sm">退出登录</button>
+{% block logout %}<form method="post" action="{{ url_for('status.console_logout') }}">{{ csrf() }}<button class="btn btn-outline-secondary btn-sm">退出登录</button>
 </form>{% endblock %}
 {% block content %}
-<div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
-<h1 class="h3">运行管理</h1>
-<span class="badge text-bg-{{ 'success' if health.ok else 'danger' }}">{{ '服务正常' if health.ok else '服务异常' }} · {{ health.coordination.backend }} · v{{ state.version }}</span>
+<div class="lq-page-head">
+<div><div class="lq-eyebrow">管理控制台</div><h1>运行管理</h1><p>管理流量规则、上游连接与运行配置</p></div>
+<span class="badge lq-service-state text-bg-{{ 'success' if health.ok else 'danger' }}">{{ '服务正常' if health.ok else '服务异常' }} · {{ health.coordination.backend }} · v{{ state.version }}</span>
 </div>
-<nav class="nav nav-pills gap-1 mb-4" aria-label="控制台导航">{% for key,label in [('overview','总览'),('pools','池与规则'),('users','用户限流'),('routers','9router'),('pricing','价格'),('stats','用量'),('events','事件'),('config','配置')] %}<a class="nav-link {{ 'active' if section==key }}" href="{{ url_for('status.console',section=key) }}">{{ label }}</a>{% endfor %}</nav>
+<nav class="nav lq-tabs" aria-label="控制台导航">{% for key,label in [('overview','总览'),('pools','池与规则'),('users','用户限流'),('routers','9router'),('pricing','价格'),('stats','用量'),('events','事件'),('config','配置')] %}<a class="nav-link {{ 'active' if section==key }}"{% if section==key %} aria-current="page"{% endif %} href="{{ url_for('status.console',section=key) }}">{{ label }}</a>{% endfor %}</nav>
 {% if section=='overview' %}
-<div class="row g-3 mb-4">{% for label,value in [('池数',state.pools|length),('排队请求',state.health.held),('账本延迟（秒）',state.health.ledger_lag_sec),('闸门错误 / 小时',state.health.gate_errors_1h)] %}<div class="col-6 col-lg-3">
-<div class="card h-100">
-<div class="card-body">
-<div class="text-secondary">{{ label }}</div>
-<div class="fs-2">{{ value }}</div>
-</div>
-</div>
-</div>{% endfor %}</div>
+<div class="lq-metrics">{% for label,value in [('流量池',state.pools|length),('排队请求',state.health.held),('账本延迟（秒）',state.health.ledger_lag_sec),('闸门错误 / 小时',state.health.gate_errors_1h)] %}
+<div class="card lq-metric"><div class="lq-metric-label">{{ label }}</div><div class="lq-metric-value">{{ value }}</div></div>
+{% endfor %}</div>
 <h2 class="h5">池状态</h2>
 <div class="table-responsive">
-<table class="table table-hover bg-white">
+<table class="table table-hover">
 <thead>
 <tr>
 <th>池</th>
@@ -60,11 +56,11 @@
 </thead>
 <tbody>{% for p in state.pools %}<tr>
 <td>{{ p.name }}</td>
-<td>{{ p.state }}</td>
+<td>{{ pool_badge(p) }}</td>
 <td>{{ p.spent_1h }}</td>
 <td>{{ p.limit or '—' }}</td>
 <td>{{ p.in_flight }} / {{ p.held }}</td>
-<td>{{ p.brake }}</td>
+<td>{{ {'normal':'正常','minimum':'最低预算','reject':'保护性拒绝'}.get(p.brake,p.brake) }}</td>
 </tr>{% endfor %}</tbody>
 </table>
 </div>
@@ -72,7 +68,7 @@
 {% elif section=='pools' %}
 {% for p in state.pools %}<section class="card mb-3">
 <div class="card-body">
-<h2 class="h5">{{ p.name }} <span class="badge text-bg-secondary">{{ p.state }}</span>
+<h2 class="h5">{{ p.name }} {{ pool_badge(p) }}
 </h2>
 <p class="text-secondary">{{ p.upstream }} · {{ p.kind }} · ${{ p.spent_1h }} / 小时 · 并发 {{ p.in_flight }} · 排队 {{ p.held }}</p>{{ rule_table(settings.pools[p.name].rules,p.rules) }}<form method="post" class="row g-2 align-items-end">{{ csrf() }}<input type="hidden" name="action" value="override">
 <input type="hidden" name="pool" value="{{ p.name }}">
@@ -168,7 +164,7 @@
 </table>
 </div>
 {% elif section=='stats' %}
-<nav class="nav mb-3">{% for p in ['today','24h','7d','30d'] %}<a class="nav-link {{ 'fw-bold' if period==p }}" href="{{ url_for('status.console',section='stats',period=p) }}">{{ p }}</a>{% endfor %}</nav>
+<nav class="lq-periods mb-3" aria-label="用量时间范围">{% for p,label in [('today','今天'),('24h','24 小时'),('7d','7 天'),('30d','30 天')] %}<a class="{{ 'on' if period==p }}"{% if period==p %} aria-current="page"{% endif %} href="{{ url_for('status.console',section='stats',period=p) }}">{{ label }}</a>{% endfor %}</nav>
 <p>请求 {{ stats.total.requests }} · 费用 ${{ stats.total.eusd }} · 错误 {{ stats.total.errors }} · 缓存命中 {{ stats.total.cache_hit_rate|percent }}</p>
 <div class="table-responsive">
 <table class="table">
@@ -208,7 +204,7 @@
 <td class="text-nowrap">{{ e.ts|when }}</td>
 <td>{{ e.pool or '—' }}</td>
 <td>{{ e.event }}</td>
-<td>{{ e.detail|describe }}</td>
+<td class="lq-table-detail">{{ e.detail|describe }}</td>
 </tr>{% endfor %}</tbody>
 </table>
 </div>
