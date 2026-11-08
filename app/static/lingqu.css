@@ -111,6 +111,10 @@ pre { border: 1px solid var(--lq-line); border-radius: 8px; }
 .lq-pool { padding: 22px; min-width: 0; }
 .lq-pool .head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .lq-pool .name { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 15px; font-weight: 650; }
+.lq-pool-summary { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; margin-top: 10px; color: var(--lq-muted); font-size: 12px; }
+.lq-pool-summary strong { color: var(--lq-fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.lq-pool-member { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--lq-line); }
+.lq-pool-kind { font-size: 13px; font-weight: 600; margin-right: auto; }
 .lq-pool dl { display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr); gap: 8px 16px; margin: 18px 0 0; font-size: 13px; }
 .lq-pool dt { font-weight: 400; color: var(--lq-muted); }
 .lq-pool dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }

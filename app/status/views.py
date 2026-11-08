@@ -118,6 +118,24 @@ def _describe(d):
         return out + (f"，到 {_when(d['until'])}" if d.get("until") else "")
     return d.get("message") or d.get("error") or ", ".join(f"{k}={v}" for k, v in d.items())
 
+
+def overview_pool_groups(pools):
+    """Group provider cards for display; admission rules and the status API stay per pool."""
+    groups = {}
+    for pool in pools:
+        name, separator, provider = pool["name"].rpartition("/")
+        if not separator:
+            name, provider = pool["name"], pool["kind"]
+        key = (name, pool["upstream"])
+        group = groups.setdefault(key, {"name": name, "upstream": pool["upstream"], "pools": [],
+                                        "spent_1h": 0, "held": 0, "in_flight": 0})
+        label = {"claude": "Claude", "gpt": "GPT", "codex": "Codex"}.get(provider, provider)
+        group["pools"].append({**pool, "label": label})
+        for field in ("spent_1h", "held", "in_flight"):
+            group[field] += pool[field]
+    return list(groups.values())
+
+
 @status.route("/")
 def overview():
     """Read-only overview on the status port: pools, metering, throttle events. No token, no
@@ -130,6 +148,7 @@ def overview():
     since = time.time() - 7 * 86400
     events = GateEvent.query.filter(GateEvent.ts >= since).order_by(GateEvent.ts.desc()).limit(100).all()
     return render_template("overview.html", now=time.time(), status=status_body, health=rt().health(),
+                           pool_groups=overview_pool_groups(status_body["pools"]),
                            period=period, periods=PERIODS, rows=sorted(st["pools"].items()), events=events,
                            event_names=EVENT_NAMES)
 
