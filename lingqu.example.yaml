@@ -122,3 +122,20 @@ notify:
 #      user: alice, unmatched: reject}
 # Larger pool.priority wins; equal-priority matches reject rather than depending on YAML order.
 # unmatched: fallback requires fallback_pool; unmatched: unknown explicitly opts into metering only.
+
+# Built-in New API billing dashboard at /usage/. Disabled unless explicitly enabled.
+# Uses a system access token (no password login); does not write to New API.
+# usage:
+#   enabled: true
+#   newapi:
+#     base_url: http://new-api:3000
+#     token: "${NEWAPI_ACCESS_TOKEN}"
+#     user_id: "${NEWAPI_USER_ID}"
+#   scope: managed                    # managed: MachGate channels; groups: New API groups
+#   retention_days: 90                # 1..90, in-memory; restart re-reads the logs
+#   max_records: 100000                # total successful + failed records per worker; oldest are dropped
+#   timezone: Asia/Shanghai            # controls the "today" boundary independently of the host
+#   title: 用量分析
+#   cost_label: 计费金额
+#   cost_hint: New API 售价，含分组倍率
+#   cost_note: 金额来自 New API 计费日志，包含分组倍率；与灵渠的折算费用 eUSD 分开统计。

@@ -1,1 +1,20 @@
-{% extends 'console_base.html' %}{% block content %}<div class="row justify-content-center mt-5"><div class="col-md-5 col-lg-4"><div class="card shadow-sm"><div class="card-body p-4"><h1 class="h4 mb-3">管理员登录</h1><p class="text-secondary">输入配置中的管理员 token。</p>{% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}<label for="token" class="form-label">管理员 token</label><input id="token" class="form-control mb-3" type="password" name="token" autocomplete="current-password" required><button class="btn btn-primary w-100">登录</button></form></div></div></div></div>{% endblock %}
+{% extends 'console_base.html' %}
+{% block title %}管理员登录 · 灵渠{% endblock %}
+{% block main_class %}lq-auth-main{% endblock %}
+{% block content %}
+<section class="card lq-auth-card">
+  <div class="card-body">
+    <div class="lq-eyebrow">管理访问</div>
+    <h1>登录灵渠</h1>
+    <p class="text-secondary mb-4">使用管理员 token 登录，继续访问管理页面。</p>
+    {% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+      <label for="token" class="form-label">管理员 token</label>
+      <input id="token" class="form-control mb-3" type="password" name="token" autocomplete="current-password" placeholder="输入管理员 token" required autofocus{% if error %} aria-invalid="true"{% endif %}>
+      <button type="submit" class="btn btn-primary w-100">登录</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

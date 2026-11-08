@@ -18,6 +18,7 @@ from .observe.notify import Notifier
 from .pricing.sync import Pricing
 from .quota import QuotaCollector
 from .manager import Manager
+from .usage.service import Usage
 
 log = logging.getLogger("lingqu")
 VERSION = "0.9.3"
@@ -63,6 +64,7 @@ class Runtime:
         self.recovery = None                   # set by recover(): None in tests and the CLI
         self.capacity_event_at = 0.0
         self.pruned_at = clock()
+        self.usage = Usage(self)
 
     def _share_sessions(self):
         sessions = [self.pricing.session] + list(self.quota.sessions.values()) + [
@@ -260,6 +262,8 @@ class Runtime:
         new, errors, warnings = settings_mod.load(path or self.settings.path)
         if not errors and new.redis != self.settings.redis:
             errors.append("redis settings require a coordinated restart")
+        if not errors and new.usage != self.settings.usage:
+            errors.append("usage settings require a restart")
         if not errors and (new.proxy_port != self.settings.proxy_port or new.status_port != self.settings.status_port or
                            new.dashboard_ports() != self.settings.dashboard_ports() or new.dsn != self.settings.dsn):
             errors.append("database and listening port changes require a restart")
@@ -397,6 +401,8 @@ class Runtime:
         self._loop("quota", 15, self.quota.tick)
         self._loop("notify", 0, self.notifier.run_once)
         self._loop("manager", 15, self.manager.tick)
+        if self.settings.usage:
+            self._loop("usage", 5, self.usage.tick)
 
     def shutdown(self):
         """SIGTERM: held requests get a 503 at once; streams already running carry on."""

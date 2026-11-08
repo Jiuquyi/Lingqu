@@ -92,6 +92,7 @@ class QuotaCollector:
         self.attempts = {}
         self.errors = {}
         self.connections = {}
+        self.connection_names = {}  # display-only labels; never retains provider tokens
         self.lock = threading.Lock()  # serialize manual and background syncs, never held on the data path
         self.configure()
 
@@ -110,6 +111,7 @@ class QuotaCollector:
         self.sessions = sessions
         self.attempts.clear()
         self.connections.clear()
+        self.connection_names.clear()
         self.errors.clear()
 
     def tick(self):
@@ -139,6 +141,9 @@ class QuotaCollector:
                     connections = body.get("connections") if isinstance(body, dict) else None
                     if not isinstance(connections, list):
                         raise ValueError("providers response needs connections[]")
+                    self.connection_names[name] = {
+                        c["id"]: next((c[k] for k in ("name", "email") if isinstance(c.get(k), str) and c[k]), c["id"])
+                        for c in connections if isinstance(c, dict) and isinstance(c.get("id"), str)}
                 except Exception as e:
                     for p in pools:
                         self._failed(p.name, e)

@@ -2,6 +2,8 @@
 
 架在 New API 和 9router 之间的流控代理：把每次请求的 token 按价格表折算成等价美元（eUSD），按"池"（一个订阅账户的一类上游）分别核算；超过每小时限额时，请求在灵渠里排队、按间隔匀速放出，而不是报错。设计见 [docs/DESIGN.md](docs/DESIGN.md)。
 
+可选的内置[用量分析](docs/USAGE.md)提供 `/usage/`，读取 New API 计费日志并复用灵渠的额度、限额和管理员登录；界面规范见 [UI.md](docs/UI.md)。
+
 当前实现覆盖里程碑 M1 ～ M5（DESIGN §14）。M5 的配置、升级和多实例边界见 [docs/M5.md](docs/M5.md)。计量生命周期、幂等、恢复与 RPO、进程容量和 shadow 观察项见 [docs/RELIABILITY.md](docs/RELIABILITY.md)（0.9.0，迁移 `0005`）：
 
 | 已实现 | 推后 |

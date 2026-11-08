@@ -137,6 +137,7 @@ class Settings:
     max_body_in_flight_mb: float = 256   # request bodies held in memory at once
     dsn: str = ""
     pricing: dict = field(default_factory=dict)
+    usage: dict = field(default_factory=dict)  # optional New API billing dashboard
     max_hold: float = 150
     max_queue: int = 8
     hold_cap_cached: float = 120
@@ -226,13 +227,14 @@ def _load(path=None, text=None):
     if not isinstance(raw, dict):
         return s, ["config: top level must be a mapping"], []
     raw = ld.env(raw)
-    for section in ("server", "storage", "pricing", "defaults", "notify"):
+    for section in ("server", "storage", "pricing", "defaults", "notify", "usage"):
         if raw.get(section) is not None and not isinstance(raw[section], dict):
             ld.errors.append(f"{section}: must be a mapping")
             raw[section] = {}
     _server(ld, s, raw.get("server") or {})
     s.dsn = ((raw.get("storage") or {}).get("dsn") or "").strip()
     _pricing(ld, s, raw.get("pricing") or {})
+    _usage(ld, s, raw.get("usage") or {})
     _defaults(ld, s, raw.get("defaults") or {})
     s.fifo = _steps(ld, "fifo", raw.get("fifo"), DEFAULT_FIFO, ("at", "gap"))
     s.phase = _steps(ld, "phase", raw.get("phase"), DEFAULT_PHASE, ("at", "off", "on"))
@@ -770,3 +772,62 @@ def _redis(ld, s, raw):
                "socket_timeout": ld.duration("redis.socket_timeout", raw.get("socket_timeout"), 3)}
     if s.redis["lease"] < 30:
         ld.errors.append("redis.lease: must be at least 30s (active streams renew every 10s)")
+
+
+def _usage(ld, s, raw):
+    """Billing collection is opt-in and never needs a New API login session."""
+    from urllib.parse import urlsplit
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        ld.errors.append("usage.enabled: must be true or false")
+        return
+    if not enabled:
+        s.usage = {}
+        return
+    api = raw.get("newapi") or {}
+    if not isinstance(api, dict):
+        ld.errors.append("usage.newapi: must be a mapping")
+        return
+    base = api.get("base_url", "http://new-api:3000")
+    parsed = urlsplit(base) if isinstance(base, str) else None
+    if (not parsed or parsed.scheme not in ("http", "https") or not parsed.hostname
+            or parsed.username or parsed.password or parsed.query or parsed.fragment):
+        ld.errors.append("usage.newapi.base_url: must be an http(s) URL without credentials, query or fragment")
+        base = ""
+    token = api.get("token", "")
+    if not isinstance(token, str) or not token or any(c in token for c in "\r\n"):
+        ld.errors.append("usage.newapi.token: a system access token is required")
+        token = ""
+    uid = str(api.get("user_id", ""))
+    if not uid.isascii() or not uid.isdigit() or int(uid) < 1:
+        ld.errors.append("usage.newapi.user_id: a positive admin user ID is required")
+        uid = ""
+    if not s.admin_token:
+        ld.errors.append("usage.enabled needs server.admin_token")
+    scope = raw.get("scope", "managed")
+    if scope not in ("managed", "groups"):
+        ld.errors.append("usage.scope: must be managed or groups")
+    retention = raw.get("retention_days", 90)
+    if isinstance(retention, bool) or not isinstance(retention, int) or not 1 <= retention <= 90:
+        ld.errors.append("usage.retention_days: must be an integer from 1 to 90")
+        retention = 90
+    maximum = raw.get("max_records", 100000)
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or not 1 <= maximum <= 500000:
+        ld.errors.append("usage.max_records: must be an integer from 1 to 500000")
+        maximum = 100000
+    zone = raw.get("timezone", "Asia/Shanghai")
+    try:
+        ZoneInfo(zone)
+    except (ZoneInfoNotFoundError, ValueError, TypeError):
+        ld.errors.append("usage.timezone: must be an IANA timezone")
+        zone = "Asia/Shanghai"
+    wording = {"title": "用量分析", "cost_label": "计费金额", "cost_hint": "New API 售价，含分组倍率",
+               "cost_note": "金额来自 New API 的实际计费日志，包含分组倍率；与灵渠用于限流的折算费用 eUSD 分开统计。"}
+    for key, default in wording.items():
+        value = raw.get(key, default)
+        if not isinstance(value, str) or not value.strip():
+            ld.errors.append(f"usage.{key}: must be a non-empty string")
+            value = default
+        wording[key] = value
+    s.usage = {"newapi": {"base_url": base.rstrip("/"), "token": token, "user_id": uid},
+               "scope": scope, "retention_days": retention, "max_records": maximum, "timezone": zone, **wording}
