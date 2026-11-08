@@ -7,20 +7,29 @@
   <span class="badge lq-service-state {{ 'ok' if health.ok else 'bad' }}">{{ '服务正常' if health.ok else '服务异常' }} · v{{ status.version }}</span>
 </div>
 <div class="lq-metrics">
-  <div class="card lq-metric"><div class="lq-metric-label">流量池</div><div class="lq-metric-value">{{ status.pools | length }}<span class="lq-metric-unit">个</span></div></div>
+  <div class="card lq-metric"><div class="lq-metric-label">流量组</div><div class="lq-metric-value">{{ pool_groups | length }}<span class="lq-metric-unit">个</span></div></div>
   <div class="card lq-metric"><div class="lq-metric-label">最近 60 分钟费用</div><div class="lq-metric-value">${{ '%.2f' | format(status.pools | sum(attribute='spent_1h')) }}</div></div>
   <div class="card lq-metric"><div class="lq-metric-label">排队请求</div><div class="lq-metric-value">{{ status.health.held }}<span class="lq-metric-unit">个</span></div></div>
   <div class="card lq-metric"><div class="lq-metric-label">闸门错误 / 小时</div><div class="lq-metric-value {{ 'bad' if status.health.gate_errors_1h }}">{{ status.health.gate_errors_1h }}<span class="lq-metric-unit">次</span></div></div>
 </div>
 <section class="lq-section" aria-labelledby="pools-heading">
-<div class="lq-section-head"><h2 id="pools-heading">流量池</h2><p>按池查看额度与调度状态</p></div>
+<div class="lq-section-head"><h2 id="pools-heading">流量池</h2><p>按团队汇总，分别查看各类流量的额度与调度状态</p></div>
 <div class="lq-pool-grid">
-{% for p in status.pools %}
-  {% set pct = ((p.ratio or 0) * 100) %}
-  <div class="card lq-pool">
+{% for group in pool_groups %}
+  <div class="card lq-pool" data-pool-group="{{ group.name }}">
     <div class="head">
-      <span class="name">{{ p.name }}</span>
-      <span class="muted">{{ p.upstream }}</span>
+      <span class="name">{{ group.name }}</span>
+      <span class="muted">{{ group.upstream }}</span>
+    </div>
+    <div class="lq-pool-summary">
+      <span>最近 60 分钟 <strong>${{ '%.2f' | format(group.spent_1h) }}</strong></span>
+      <span>排队 {{ group.held }} · 进行中 {{ group.in_flight }}</span>
+    </div>
+  {% for p in group.pools %}
+  {% set pct = ((p.ratio or 0) * 100) %}
+  <section class="lq-pool-member" data-pool="{{ p.name }}" aria-label="{{ p.label }} 流量">
+    <div class="head">
+      <span class="lq-pool-kind">{{ p.label }}</span>
       {% if p.state == "rejected" %}<span class="badge bad">保护性拒绝</span>
       {% elif p.state == "queuing" %}<span class="badge warn">排队中</span>
       {% elif p.state == "override" %}<span class="badge warn">已临时取消限额</span>
@@ -54,6 +63,8 @@
       {% if p.wait_max_1h %}<dt>1 小时排队</dt><dd>中位 {{ p.wait_p50_1h }} 秒 · 最长 {{ p.wait_max_1h }} 秒</dd>{% endif %}
       {% if p.last_error %}<dt>最近错误</dt><dd class="{{ 'bad' if p.last_error.alerted else 'warn' }}" title="{{ p.last_error.detail }}">{{ p.last_error.class }} × {{ p.last_error.count }}{% if p.last_error.streak %} · 连续 {{ p.last_error.streak }} 次{% endif %} · {{ p.last_error.at | ago }}</dd>{% endif %}
     </dl>
+  </section>
+  {% endfor %}
   </div>
 {% else %}<div class="card lq-empty">尚未配置流量池</div>{% endfor %}
 </div>

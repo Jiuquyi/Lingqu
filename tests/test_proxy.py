@@ -453,6 +453,18 @@ class DashboardGateTestCase(unittest.TestCase):
         page = r.get_data(as_text=True)
         self.assertEqual(r.status_code, 200)
         self.assertIn("a/claude", page)
+        self.assertEqual(page.count('class="card lq-pool"'), 2)
+        self.assertEqual(page.count('data-pool-group="a"'), 1)
+        self.assertIn('data-pool="a/claude"', page)
+        self.assertIn('data-pool="a/codex"', page)
+        self.assertIn('aria-label="Claude 流量"', page)
+        self.assertIn('aria-label="Codex 流量"', page)
+        self.assertIn('临时限额 $1.00', page)
+        # Grouping the page must not merge the actual provider pools or their budgets.
+        pools = self.c.get("/status", environ_overrides=env).get_json()["pools"]
+        self.assertEqual(len(pools), 3)
+        self.assertEqual(next(p for p in pools if p["name"] == "a/claude")["limit"], 1)
+        self.assertIsNone(next(p for p in pools if p["name"] == "a/codex")["limit"])
         self.assertIn("排队中", page)
         self.assertIn("管理员覆盖", page)
         self.assertNotIn("<form", page)
