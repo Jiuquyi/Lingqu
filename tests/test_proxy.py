@@ -395,6 +395,9 @@ class DashboardGateTestCase(unittest.TestCase):
         self.assertTrue(r.headers["Location"].startswith("/lingqu/console/login?next="), r.headers["Location"])
         self.assertIn("next=/lingqu/?period%3D7d", r.headers["Location"])
         self.assertEqual(self.c.get("/v1/models", environ_overrides=local).status_code, 404)
+        login = self.c.post("/dashboards", data={"action": "login", "token": "adm"}, environ_overrides=local)
+        self.assertEqual(login.headers["Location"], "/lingqu/dashboards")
+        self.assertIn("Path=/lingqu", login.headers["Set-Cookie"])
         for bad in ("lingqu", "/lingqu/", "/a b", "//x"):
             _, errors, _ = read_settings(text=BASE.replace("server: { admin_token: adm, fail_mode: open }",
                                                            f"server: {{ admin_token: adm, path_prefix: '{bad}' }}"))

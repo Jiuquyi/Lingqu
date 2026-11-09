@@ -345,10 +345,12 @@ def dashboards_page():
                 error = str(e)
         if error is None:
             resp = redirect(url_for("status.dashboards_page"), code=303)
+            # Under a path prefix the host serves other apps too: keep the raw token to this one.
+            path = request.script_root or "/"
             if token:
-                resp.set_cookie(TOKEN_COOKIE, token, httponly=True, samesite="Strict", max_age=7 * 86400)
+                resp.set_cookie(TOKEN_COOKIE, token, httponly=True, samesite="Strict", max_age=7 * 86400, path=path)
             else:
-                resp.delete_cookie(TOKEN_COOKIE)
+                resp.delete_cookie(TOKEN_COOKIE, path=path)
             return resp
     rows = dash_view(token) if token else []
     # The switch page may sit behind a proxy on another name (HTTPS, maybe under HSTS) while the
