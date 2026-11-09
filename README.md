@@ -20,3 +20,4 @@
 | 0.9.1：多个池共用一个订阅账户时用 `account` 标出，额度校准按账户合并各池费用、按整个周期累计并保留最近 48 个周期；同一周期的重置时间允许 2 分钟抖动（[M4](docs/M4.md)） | |
 | 0.9.2：额度校准不再被旧快照切碎（周期内只认不低于最高值的读数，跳过已过期或没有重置时间的读数），每个周期记下同账户其他窗口的涨幅（`peers`），可按比例在窗口间换算（[M4](docs/M4.md)） | |
 | 0.9.3：`server.private_status` 让状态页只对管理员和本机开放，`server.dashboards_url` 指定关闭页上的开关页地址，`server.dashboard_gate_host` 指定开关页上入口链接的主机；状态端口可以对外开放来承载 Dashboard 开关页；`flask check` 不再探测没有池使用的 upstream（只开 Dashboard 入口、还在接入账号的实例）；`/console/auth-check` 让反向代理把控制台登录借给同域名下的其他页面，登录页支持 `next`；`server.links` 给页面加导航栏，未登录打开总览会跳到登录页（[M5](docs/M5.md)） | |
+| 0.9.4：总览、控制台、登录页和 Dashboard 开关页共用一套界面（[UI.md](docs/UI.md)），总览按团队合并卡片；可选的内置[用量分析](docs/USAGE.md)（`usage.enabled`）；`server.path_prefix` 让状态端口挂在反向代理的子路径下（如 `/lingqu`，代理转发前去掉前缀），页面上的链接、样式表和跳转都带上前缀 | |

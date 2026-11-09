@@ -55,6 +55,8 @@ class PortDispatcher:
         if where == "status":
             if path.startswith(STATUS_BLOCKED_PREFIXES):
                 return NotFound()(environ, start_response)
+            if self.rt.settings.path_prefix:
+                environ["SCRIPT_NAME"] = self.rt.settings.path_prefix
             return self.app.wsgi_app(environ, start_response)
         if isinstance(where, tuple):
             return self.gateway(where[1])(environ, start_response)

@@ -46,7 +46,7 @@ def _private_status():
             # A browser: log in to the console, then come back.
             from .console import console_authenticated
             if not console_authenticated():
-                return redirect(url_for("status.console_login", next=request.full_path.rstrip("?")))
+                return redirect(url_for("status.console_login", next=request.script_root + request.full_path.rstrip("?")))
         require_admin()
 
 

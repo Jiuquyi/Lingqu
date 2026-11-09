@@ -377,6 +377,29 @@ class DashboardGateTestCase(unittest.TestCase):
         self.assertIn("http://203.0.113.9:8101/dashboard", page)
         self.assertNotIn("switch.example:8101", page)
 
+    def test_path_prefix_puts_links_and_assets_under_the_proxy_path(self):
+        s = load(BASE.replace("server: { admin_token: adm, fail_mode: open }",
+                              "server: { admin_token: adm, fail_mode: open, path_prefix: /lingqu, private_status: true }")
+                 .replace("http://r1:20128", self.router.url).replace("http://r2:20128", self.router.url))
+        self.rt.settings = s
+        local = {"SERVER_PORT": "8091", "REMOTE_ADDR": "127.0.0.1"}
+        page = self.c.get("/", environ_overrides=local).get_data(as_text=True)
+        self.assertIn('href="/lingqu/static/lingqu.css"', page)
+        self.assertIn('href="/lingqu/"', page)
+        self.assertIn('href="/lingqu/status"', page)
+        css = self.c.get("/static/lingqu.css", environ_overrides=local)
+        self.assertEqual(css.status_code, 200)
+        css.close()
+        r = self.c.get("/?period=7d", environ_overrides={"SERVER_PORT": "8091", "REMOTE_ADDR": "203.0.113.5"})
+        self.assertEqual(r.status_code, 302)
+        self.assertTrue(r.headers["Location"].startswith("/lingqu/console/login?next="), r.headers["Location"])
+        self.assertIn("next=/lingqu/?period%3D7d", r.headers["Location"])
+        self.assertEqual(self.c.get("/v1/models", environ_overrides=local).status_code, 404)
+        for bad in ("lingqu", "/lingqu/", "/a b", "//x"):
+            _, errors, _ = read_settings(text=BASE.replace("server: { admin_token: adm, fail_mode: open }",
+                                                           f"server: {{ admin_token: adm, path_prefix: '{bad}' }}"))
+            self.assertTrue(any("path_prefix" in e for e in errors), bad)
+
     def test_navigation_only_with_links_and_overview_sends_browsers_to_login(self):
         env = {"SERVER_PORT": "8091", "REMOTE_ADDR": "127.0.0.1"}
         self.assertNotIn("lq-nav", self.c.get("/", environ_overrides=env).get_data(as_text=True))

@@ -133,6 +133,9 @@ class Settings:
     # console and the dashboard switch page; none: no navigation bar (the pages may sit under a
     # path prefix, where links from the root would point elsewhere).
     links: list = field(default_factory=list)
+    # Path a reverse proxy serves the status port under (e.g. /lingqu, with the prefix stripped
+    # before forwarding); links, assets and redirects on the HTML pages get it. "": the root.
+    path_prefix: str = ""
     max_active: int = 0                  # proxy requests in the process at once; 0: worker threads - 8
     max_body_in_flight_mb: float = 256   # request bodies held in memory at once
     dsn: str = ""
@@ -287,6 +290,11 @@ def _server(ld, s, raw):
         ld.errors.append("server.links: must be a list of {name, url}, url absolute or starting with /")
         links = []
     s.links = [{"name": l["name"], "url": l["url"]} for l in links]
+    prefix = raw.get("path_prefix") or ""
+    if not isinstance(prefix, str) or (prefix and not re.fullmatch(r"(/[A-Za-z0-9._~-]+)+", prefix)):
+        ld.errors.append("server.path_prefix: must be empty or a path like /lingqu (no trailing slash)")
+        prefix = ""
+    s.path_prefix = prefix
     if s.private_status and not s.admin_token:
         ld.errors.append("server.private_status needs server.admin_token")
     if not s.admin_token:
